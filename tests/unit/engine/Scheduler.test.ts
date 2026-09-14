@@ -40,7 +40,7 @@ function buildMockDeps(): jest.Mocked<SchedulerDeps> {
     jobRegistry: new JobRegistry() as any,
     logger: new NullLogger() as any,
     clock: { now: jest.fn().mockReturnValue(Date.now()) } as any,
-    sleeper: { sleep: jest.fn().mockResolvedValue(undefined) } as any
+    sleeper: { sleep: jest.fn().mockImplementation((ms) => new Promise(resolve => setTimeout(resolve, ms || 1))) } as any
   };
 }
 
@@ -190,5 +190,24 @@ describe('Scheduler', () => {
 
     expect(deps.stateRepo.upsert).not.toHaveBeenCalled();
     expect(deps.healthRepo.recordFailure).toHaveBeenCalled();
+  });
+
+  it('passes operation_config to JobContext', async () => {
+    const configPolicy = { ...mockPolicy, operation_config: { maxRangeDays: 15 } };
+    (deps.policyRepo.findEnabledByProvider as jest.Mock).mockResolvedValue([configPolicy]);
+    
+    let contextConfig: any = null;
+    const mockJob: IJob = {
+      execute: jest.fn().mockImplementation(async (context: JobContext) => {
+        contextConfig = context.policy.operation_config;
+        return { success: true, cursorValue: null };
+      })
+    };
+    deps.jobRegistry.get = jest.fn().mockReturnValue(mockJob);
+
+    await scheduler.tick('zeiss');
+
+    expect(mockJob.execute).toHaveBeenCalled();
+    expect(contextConfig).toEqual({ maxRangeDays: 15 });
   });
 });

@@ -8,7 +8,7 @@ export class PgSyncPolicyRepository implements ISyncPolicyRepository {
     const query = `
       SELECT provider, domain, operation, enabled, interval_seconds, lookback_seconds, 
              timeout_seconds, lease_ttl_seconds, max_retries, retry_delay_seconds, 
-             created_at, updated_at
+             operation_config, created_at, updated_at
       FROM integration.sync_policies
       WHERE enabled = true AND provider = $1
     `;
@@ -17,7 +17,7 @@ export class PgSyncPolicyRepository implements ISyncPolicyRepository {
 
   async findAllEnabled(): Promise<SyncPolicy[]> {
     const query = `
-      SELECT provider, domain, operation, enabled, interval_seconds, lookback_seconds, timeout_seconds, lease_ttl_seconds, max_retries, retry_delay_seconds
+      SELECT provider, domain, operation, enabled, interval_seconds, lookback_seconds, timeout_seconds, lease_ttl_seconds, max_retries, retry_delay_seconds, operation_config
       FROM integration.sync_policies
       WHERE enabled = true
     `;
@@ -28,7 +28,7 @@ export class PgSyncPolicyRepository implements ISyncPolicyRepository {
     const query = `
       SELECT provider, domain, operation, enabled, interval_seconds, lookback_seconds, 
              timeout_seconds, lease_ttl_seconds, max_retries, retry_delay_seconds, 
-             created_at, updated_at
+             operation_config, created_at, updated_at
       FROM integration.sync_policies
       WHERE provider = $1 AND domain = $2 AND operation = $3
     `;
