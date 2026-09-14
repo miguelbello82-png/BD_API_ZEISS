@@ -9,7 +9,9 @@
   },
   "scripts": {
     "test": "jest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "worker": "node dist/worker.js"
   },
   "keywords": [],
   "author": "",
