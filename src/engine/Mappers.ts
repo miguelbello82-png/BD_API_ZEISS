@@ -115,6 +115,16 @@ export class TrackingMapper {
 // ============================================================
 
 export class CampaignMapper {
+  private static parseZeissDate(val: unknown): string | null {
+    if (typeof val !== 'string' || val.trim() === '') return null;
+    const parts = val.trim().split('-');
+    if (parts.length !== 3 || parts[0].length !== 2 || parts[1].length !== 2 || parts[2].length !== 4) {
+      throw new ContractMappingError(`Invalid CAM-001 date format: expected DD-MM-YYYY, got ${val}`);
+    }
+    // Return YYYY-MM-DD
+    return `${parts[2]}-${parts[1]}-${parts[0]}`;
+  }
+
   static normalize(raw: unknown): CampaignRecord {
     if (!raw || typeof raw !== 'object') {
       throw new ContractMappingError('Invalid campaign payload: expected object');
@@ -131,8 +141,8 @@ export class CampaignMapper {
       title: typeof rawObj.titulo === 'string' ? rawObj.titulo : null, // source: titulo
       slogan: typeof rawObj.slogan === 'string' ? rawObj.slogan : null, // source: slogan
       description: typeof rawObj.descricao === 'string' ? rawObj.descricao : null, // source: descricao
-      start_date: typeof rawObj.datainicial === 'string' ? rawObj.datainicial : null, // source: datainicial
-      end_date: typeof rawObj.datafinal === 'string' ? rawObj.datafinal : null, // source: datafinal
+      start_date: CampaignMapper.parseZeissDate(rawObj.datainicial), // source: datainicial
+      end_date: CampaignMapper.parseZeissDate(rawObj.datafinal), // source: datafinal
       status: typeof rawObj.ativosn === 'string' ? rawObj.ativosn : null, // source: ativosn
       aceite: typeof rawObj.aceite === 'boolean' ? rawObj.aceite : null, // source: aceite
       incentive_type: typeof rawObj.incentivo === 'string' ? rawObj.incentivo : null, // source: incentivo

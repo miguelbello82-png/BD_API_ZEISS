@@ -107,8 +107,8 @@ describe('Mappers', () => {
         titulo: 'Campanha Teste',
         slogan: 'Teste',
         descricao: 'Teste Desc',
-        datainicial: '2023-01-01',
-        datafinal: '2023-12-31',
+        datainicial: '25-06-2023',
+        datafinal: '31-12-2099',
         ativosn: 'S',
         imagem_campanha: 'img.png',
         aceite: true,
@@ -118,8 +118,8 @@ describe('Mappers', () => {
       const result = CampaignMapper.normalize(payload);
       expect(result.campaign_id).toBe('CMP-001');
       expect(result.title).toBe('Campanha Teste');
-      expect(result.start_date).toBe('2023-01-01');
-      expect(result.end_date).toBe('2023-12-31');
+      expect(result.start_date).toBe('2023-06-25');
+      expect(result.end_date).toBe('2099-12-31');
       expect(result.status).toBe('S');
       expect(result.aceite).toBe(true);
       expect(result.incentive_type).toBe('brindes');
@@ -128,6 +128,18 @@ describe('Mappers', () => {
     it('throws if idcampanha is missing', () => {
       const payload = { titulo: 'Campanha Teste' };
       expect(() => CampaignMapper.normalize(payload)).toThrow('Campaign missing required idcampanha identifier');
+    });
+
+    it('returns null for empty dates', () => {
+      const payload = { idcampanha: '1', datainicial: '', datafinal: null };
+      const result = CampaignMapper.normalize(payload);
+      expect(result.start_date).toBeNull();
+      expect(result.end_date).toBeNull();
+    });
+
+    it('throws ContractMappingError on malformed dates', () => {
+      const payload = { idcampanha: '1', datainicial: '2023/06/25' };
+      expect(() => CampaignMapper.normalize(payload)).toThrow(ContractMappingError);
     });
   });
 });
