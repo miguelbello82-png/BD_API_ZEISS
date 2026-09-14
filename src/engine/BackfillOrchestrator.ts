@@ -40,13 +40,13 @@ export class BackfillOrchestrator {
     try {
       const policy = await policyRepo.findByKey(providerName, domainName, operationName);
       if (!policy || !policy.enabled) {
-        logger.error('backfill', 'Orders discovery policy is not enabled or not found');
+        logger.error('backfill', 'Orders discovery policy is not enabled or not found', { policyEnabled: policy?.enabled });
         return { success: false, windowsProcessed, finalCursor: currentCursor, totalDiscovered, totalHydrated, totalErrors };
       }
 
       const acquisition = await leaseRepo.tryAcquire(providerName, domainName, operationName, workerId, policy.lease_ttl_seconds);
       if (!acquisition.acquired) {
-        logger.error('backfill', 'Could not acquire lease');
+        logger.error('backfill', 'Could not acquire lease', { acquisition });
         return { success: false, windowsProcessed, finalCursor: currentCursor, totalDiscovered, totalHydrated, totalErrors };
       }
 
@@ -73,20 +73,23 @@ export class BackfillOrchestrator {
       let loopSuccess = true;
       for (let i = 0; i < maxWindows; i++) {
         if (ownershipLost) {
-          logger.error('backfill', 'Stopping loop due to lost lease');
+          logger.error('backfill', 'Stopping loop due to lost lease', { windowIndex: i });
+          loopSuccess = false;
           break;
         }
 
         const state = await stateRepo.findByKey(providerName, domainName, operationName);
         if (!state || !state.cursor_value) {
-          logger.error('backfill', 'No valid cursor found');
+          logger.error('backfill', 'No valid cursor found. Bootstrap required.', { stateExists: !!state });
+          loopSuccess = false;
           break;
         }
 
         const cursorObj = JSON.parse(state.cursor_value);
         const lastEndDateStr = cursorObj.lastEndDate;
         if (!lastEndDateStr) {
-          logger.error('backfill', 'Corrupted cursor');
+          logger.error('backfill', 'Corrupted cursor, missing lastEndDate', { cursorObj });
+          loopSuccess = false;
           break;
         }
 
@@ -112,7 +115,7 @@ export class BackfillOrchestrator {
         const result = await ordersSync.execute(context);
 
         if (!result.success) {
-          logger.error('backfill', 'Window failed');
+          logger.error('backfill', 'Window failed during OrdersSync execution', { error: result.error?.message });
           totalErrors++;
           loopSuccess = false;
           break; // Stop immediately on failure
@@ -121,7 +124,8 @@ export class BackfillOrchestrator {
         const stillOwner = await leaseRepo.renew(providerName, domainName, operationName, workerId, policy.lease_ttl_seconds).catch(() => false);
         if (!stillOwner) {
           ownershipLost = true;
-          logger.error('backfill', 'Lost lease ownership prior to state advancement');
+          logger.error('backfill', 'Lost lease ownership prior to state advancement', { windowIndex: i });
+          loopSuccess = false;
           break;
         }
 
@@ -151,6 +155,9 @@ export class BackfillOrchestrator {
       return { success: loopSuccess, windowsProcessed, finalCursor: currentCursor, totalDiscovered, totalHydrated, totalErrors };
     } catch (err) {
       if (keepaliveTimer) clearInterval(keepaliveTimer);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      logger.error('backfill', 'Fatal exception caught in orchestrator', { error: errorMessage, stack });
       return { success: false, windowsProcessed, finalCursor: currentCursor, totalDiscovered, totalHydrated, totalErrors };
     }
   }
