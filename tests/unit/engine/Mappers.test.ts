@@ -1,4 +1,4 @@
-import { OrdersMapper, OrderDetailMapper, TrackingMapper, ContractMappingError } from '../../../src/engine/Mappers';
+import { OrdersMapper, OrderDetailMapper, TrackingMapper, CampaignMapper, ContractMappingError } from '../../../src/engine/Mappers';
 
 describe('Mappers', () => {
   describe('OrdersMapper', () => {
@@ -96,6 +96,38 @@ describe('Mappers', () => {
       expect(result[0].status_entrega).toBe('Sim');
       expect((result[0] as any).signed_url).toBeUndefined();
       expect((result[0] as any).token).toBeUndefined();
+    });
+  });
+
+  describe('CampaignMapper', () => {
+    it('normalizes valid campaign payload using real CAM-001 keys', () => {
+      const payload = {
+        idcampanha: 'CMP-001',
+        idtipocampanha: 'TYPE-1',
+        titulo: 'Campanha Teste',
+        slogan: 'Teste',
+        descricao: 'Teste Desc',
+        datainicial: '2023-01-01',
+        datafinal: '2023-12-31',
+        ativosn: 'S',
+        imagem_campanha: 'img.png',
+        aceite: true,
+        vouchers: 10,
+        incentivo: 'brindes'
+      };
+      const result = CampaignMapper.normalize(payload);
+      expect(result.campaign_id).toBe('CMP-001');
+      expect(result.title).toBe('Campanha Teste');
+      expect(result.start_date).toBe('2023-01-01');
+      expect(result.end_date).toBe('2023-12-31');
+      expect(result.status).toBe('S');
+      expect(result.aceite).toBe(true);
+      expect(result.incentive_type).toBe('brindes');
+    });
+
+    it('throws if idcampanha is missing', () => {
+      const payload = { titulo: 'Campanha Teste' };
+      expect(() => CampaignMapper.normalize(payload)).toThrow('Campaign missing required idcampanha identifier');
     });
   });
 });

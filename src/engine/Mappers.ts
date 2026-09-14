@@ -122,20 +122,20 @@ export class CampaignMapper {
 
     const rawObj = raw as Record<string, unknown>;
 
-    if (typeof rawObj.id_campanha !== 'string' && typeof rawObj.id_campanha !== 'number') {
-      throw new ContractMappingError('Campaign missing required id_campanha identifier');
+    if (typeof rawObj.idcampanha !== 'string' && typeof rawObj.idcampanha !== 'number') {
+      throw new ContractMappingError('Campaign missing required idcampanha identifier');
     }
 
     return {
-      campaign_id: String(rawObj.id_campanha),
-      title: typeof rawObj.titulo === 'string' ? rawObj.titulo : null,
-      slogan: typeof rawObj.slogan === 'string' ? rawObj.slogan : null,
-      description: typeof rawObj.descricao === 'string' ? rawObj.descricao : null,
-      start_date: typeof rawObj.data_inicio === 'string' ? rawObj.data_inicio : null,
-      end_date: typeof rawObj.data_fim === 'string' ? rawObj.data_fim : null,
-      status: typeof rawObj.status === 'string' ? rawObj.status : null,
-      aceite: typeof rawObj.aceite === 'boolean' ? rawObj.aceite : null,
-      incentive_type: typeof rawObj.tipo_incentivo === 'string' ? rawObj.tipo_incentivo : null,
+      campaign_id: String(rawObj.idcampanha), // source: idcampanha
+      title: typeof rawObj.titulo === 'string' ? rawObj.titulo : null, // source: titulo
+      slogan: typeof rawObj.slogan === 'string' ? rawObj.slogan : null, // source: slogan
+      description: typeof rawObj.descricao === 'string' ? rawObj.descricao : null, // source: descricao
+      start_date: typeof rawObj.datainicial === 'string' ? rawObj.datainicial : null, // source: datainicial
+      end_date: typeof rawObj.datafinal === 'string' ? rawObj.datafinal : null, // source: datafinal
+      status: typeof rawObj.ativosn === 'string' ? rawObj.ativosn : null, // source: ativosn
+      aceite: typeof rawObj.aceite === 'boolean' ? rawObj.aceite : null, // source: aceite
+      incentive_type: typeof rawObj.incentivo === 'string' ? rawObj.incentivo : null, // source: incentivo
     };
   }
 }
