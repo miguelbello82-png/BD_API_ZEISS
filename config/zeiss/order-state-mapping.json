@@ -1,0 +1,9 @@
+{
+  "cancelled": {
+    "field": "status",
+    "values": ["Cancelado"]
+  },
+  "billed": {
+    "codsit": ["6.1"]
+  }
+}

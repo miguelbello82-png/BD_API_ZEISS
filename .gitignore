@@ -1,0 +1,36 @@
+.env
+.env.local
+node_modules/
+dist/
+
+# Local environments and credentials
+.env.*
+!.env.example
+.agents/
+**/credentials*
+**/*credential*.json
+**/*secret*.json
+**/*service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+# Local execution and review artifacts
+evidence/
+scratch/
+scratch_*
+*.log
+coverage/
+*.tsbuildinfo
+C2.*
+REMOTE_*.md
+task.md
+walkthrough.md
+# Unverified external reference documents
+docs/api/zeiss/Oficial/
+docs/api/zeiss/Catalogo/*.pdf
+
+# Local account identifiers in API reference
+docs/api/zeiss/API_ZEISS.sanitized.postman_collection.json
+docs/api/zeiss/Suite_RMG_API_Intelligence_v0.25.0.md

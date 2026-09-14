@@ -1,0 +1,42 @@
+{
+  "version": "V1_042026",
+  "valid_from": "2026-04-01",
+  "families": [
+    {
+      "name": "ZEISS ClearMind Individual 3",
+      "category": "VISÃO SIMPLES",
+      "variants": [
+        {
+          "index": "1.5",
+          "material": "Resina",
+          "treatments": [
+            { "name": "DuraVision Gold UV", "price": 2877.00 },
+            { "name": "DuraVision Platinum UV", "price": 2737.00 }
+          ]
+        },
+        {
+          "index": "1.6",
+          "material": "Resina",
+          "treatments": [
+            { "name": "DuraVision Gold UV", "price": 3457.00 },
+            { "name": "DuraVision Platinum UV", "price": 3317.00 }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ZEISS SmartLife Individual 3",
+      "category": "VISÃO SIMPLES",
+      "variants": [
+        {
+          "index": "1.5",
+          "material": "Resina",
+          "treatments": [
+            { "name": "DuraVision Gold UV", "price": 2559.00 },
+            { "name": "DuraVision Platinum UV", "price": 2419.00 }
+          ]
+        }
+      ]
+    }
+  ]
+}
