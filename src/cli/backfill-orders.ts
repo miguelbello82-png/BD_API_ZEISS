@@ -10,13 +10,15 @@ import { PgSyncPolicyRepository } from '../repositories/postgres/SyncPolicyRepos
 import { PgSyncStateRepository } from '../repositories/postgres/SyncStateRepository';
 import { PgSyncLeaseRepository } from '../repositories/postgres/SyncLeaseRepository';
 import { BackfillOrchestrator } from '../engine/BackfillOrchestrator';
+import { randomUUID } from 'crypto';
 
 async function main() {
   const logger = new ConsoleLogger();
   const maxWindows = parseInt(process.env.MAX_BACKFILL_WINDOWS || '12', 10);
-  const workerId = `manual-backfill-${process.pid}`;
+  const workerId = randomUUID();
+  const workerLabel = `manual-backfill-${process.pid}`;
 
-  logger.info('backfill', `Starting backfill orders with maxWindows=${maxWindows}, workerId=${workerId}`);
+  logger.info('backfill', `Starting backfill orders with maxWindows=${maxWindows}, workerId=${workerId}, label=${workerLabel}`);
 
   let pool;
   try {
