@@ -19,6 +19,7 @@ export class CampaignsSyncJob implements IJob {
 
     let errors = 0;
     let synced = 0;
+    let firstError: Error | undefined;
 
     let activeCampaignIds: string[] = [];
 
@@ -30,6 +31,9 @@ export class CampaignsSyncJob implements IJob {
           return CampaignMapper.normalize(raw);
         } catch (err) {
           errors++;
+          if (!firstError) {
+            firstError = err instanceof Error ? err : new Error(String(err));
+          }
           return null;
         }
       }).filter(c => c !== null);
@@ -58,6 +62,7 @@ export class CampaignsSyncJob implements IJob {
     return {
       success: errors === 0,
       retryable: true,
+      error: firstError,
       cursorValue: JSON.stringify({ activeCampaignIds }),
       metrics: {
         synced,
