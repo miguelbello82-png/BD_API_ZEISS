@@ -11,7 +11,8 @@
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "worker": "node dist/worker.js"
+    "worker": "node dist/worker.js",
+    "backfill:orders": "node dist/cli/backfill-orders.js"
   },
   "keywords": [],
   "author": "",
