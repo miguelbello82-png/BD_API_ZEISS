@@ -13,7 +13,8 @@
     "build": "tsc -p tsconfig.build.json",
     "worker": "node dist/worker.js",
     "backfill:orders": "node dist/cli/backfill-orders.js",
-    "backfill:receivables": "node dist/cli/backfill-receivables.js"
+    "backfill:receivables": "node dist/cli/backfill-receivables.js",
+    "backfill:tracking": "node dist/cli/backfill-tracking.js"
   },
   "keywords": [],
   "author": "",
