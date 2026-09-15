@@ -101,18 +101,53 @@ describe('TrackingSync Engine', () => {
     expect(deps.trackingProvider.getTracking).toHaveBeenCalledWith('NF102', context.abortSignal);
   });
 
-  it('should correctly handle and record provider errors', async () => {
+  it('should correctly handle and record 500 errors (fetch_errors) and still advance cursor', async () => {
+    const candidates: TrackingCandidate[] = [
+      { order_id: 'o1', order_number: '101', nf_number: 'NF101', raw_order_status: 'TEST_BILLED', raw_order_codsit: null, tracking_state: null },
+      { order_id: 'o2', order_number: '102', nf_number: 'NF102', raw_order_status: 'TEST_BILLED', raw_order_codsit: null, tracking_state: null },
+    ];
+    (deps.trackingRepo.findTrackingCandidates as jest.Mock).mockResolvedValue(candidates);
+    
+    // One success, one failure
+    (deps.trackingProvider.getTracking as jest.Mock).mockImplementation((nfNumber) => {
+      if (nfNumber === 'NF101') return Promise.resolve([]);
+      return Promise.reject(new Error('Internal Server Error 500'));
+    });
+
+    const engine = new TrackingSync(deps);
+    const result = await engine.execute(context);
+
+    expect(result.metrics?.updated).toBe(1);
+    expect(result.metrics?.fetch_errors).toBe(1);
+    expect(result.metrics?.not_found).toBe(0);
+    expect(result.success).toBe(true); // Must advance cursor
+    expect(result.cursorValue).toBe(JSON.stringify({ lastOrderId: 'o2', lastNfNumber: 'NF102' }));
+  });
+
+  it('should correctly handle 404 errors (not_found) and still advance cursor', async () => {
     const candidates: TrackingCandidate[] = [
       { order_id: 'o1', order_number: '101', nf_number: 'NF101', raw_order_status: 'TEST_BILLED', raw_order_codsit: null, tracking_state: null },
     ];
     (deps.trackingRepo.findTrackingCandidates as jest.Mock).mockResolvedValue(candidates);
-    (deps.trackingProvider.getTracking as jest.Mock).mockRejectedValue(new Error('Provider Error'));
+    (deps.trackingProvider.getTracking as jest.Mock).mockRejectedValue(new Error('API returned 404 Not Found'));
 
     const engine = new TrackingSync(deps);
     const result = await engine.execute(context);
 
     expect(result.metrics?.updated).toBe(0);
-    expect(result.metrics?.errors).toBe(1);
+    expect(result.metrics?.fetch_errors).toBe(0);
+    expect(result.metrics?.not_found).toBe(1);
+    expect(result.success).toBe(true); // Must advance cursor
+    // 404 means we just don't have tracking info yet, we do not mark as terminal.
+    expect(deps.trackingRepo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('should block cursor if candidate query fails (systemic failure)', async () => {
+    (deps.trackingRepo.findTrackingCandidates as jest.Mock).mockRejectedValue(new Error('Database timeout'));
+
+    const engine = new TrackingSync(deps);
+    const result = await engine.execute(context);
+
     expect(result.success).toBe(false);
   });
 });

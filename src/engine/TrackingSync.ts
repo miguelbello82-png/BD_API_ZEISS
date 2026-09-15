@@ -41,7 +41,8 @@ export class TrackingSync implements IJob {
     
     let candidatesFound = 0;
     let updated = 0;
-    let errors = 0;
+    let not_found = 0;
+    let fetch_errors = 0;
 
     this.deps.logger.info(TrackingSync.COMPONENT, 'Starting tracking sync cycle');
 
@@ -104,12 +105,20 @@ export class TrackingSync implements IJob {
         );
         updated++;
       } catch (err) {
-        errors++;
         const message = err instanceof Error ? err.message : String(err);
-        this.deps.logger.error(TrackingSync.COMPONENT, 'Tracking fetch failed', {
-          orderNumber: candidate.order_number,
-          error: message,
-        });
+        
+        if (message.includes('404')) {
+          not_found++;
+          this.deps.logger.info(TrackingSync.COMPONENT, 'Tracking not found (404)', {
+            orderNumber: candidate.order_number,
+          });
+        } else {
+          fetch_errors++;
+          this.deps.logger.error(TrackingSync.COMPONENT, 'Tracking fetch failed', {
+            orderNumber: candidate.order_number,
+            error: message,
+          });
+        }
       }
     }
 
@@ -118,13 +127,14 @@ export class TrackingSync implements IJob {
     }
 
     return {
-      success: errors === 0,
+      success: true, // Candidate-level failures do not block cursor advancement
       retryable: true,
       cursorValue: JSON.stringify({ lastOrderId, lastNfNumber }),
       metrics: {
         candidatesFound,
         updated,
-        errors
+        not_found,
+        fetch_errors
       }
     };
   }
