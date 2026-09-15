@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "worker": "node dist/worker.js",
-    "backfill:orders": "node dist/cli/backfill-orders.js"
+    "backfill:orders": "node dist/cli/backfill-orders.js",
+    "backfill:receivables": "node dist/cli/backfill-receivables.js"
   },
   "keywords": [],
   "author": "",
