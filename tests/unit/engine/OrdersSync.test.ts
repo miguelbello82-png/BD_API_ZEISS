@@ -133,5 +133,67 @@ describe('OrdersSync Engine', () => {
       expect(result.success).toBe(true); // Must still be true to allow cursor advancement
       expect(result.metrics?.hydration_errors).toBe(1);
     });
+
+    it('should handle partial success with correct cursorValue and metrics', async () => {
+      const candidates: OrderCandidate[] = [
+        { order_id: 'o1', order_number: '101', raw_status: 'Pendente', raw_codsit: null },
+        { order_id: 'o2', order_number: '102', raw_status: 'Pendente', raw_codsit: null }
+      ];
+      (deps.ordersRepo as any).findOrdersWithoutDetail.mockResolvedValue(candidates);
+      
+      (deps.detailProvider as any).getOrderDetail.mockImplementation((orderNumber: string) => {
+        if (orderNumber === '101') return Promise.resolve({ situacao: 'ok' });
+        return Promise.reject(new Error('Internal Server Error 500'));
+      });
+
+      const engine = new OrdersSync(deps);
+      const result = await engine.execute(context);
+
+      expect(result.success).toBe(true);
+      expect(result.cursorValue).toBe(JSON.stringify({ lastEndDate: '2026-08-21' }));
+      expect(result.metrics?.hydrated).toBe(1);
+      expect(result.metrics?.hydration_errors).toBe(1);
+    });
+
+    it('should deduplicate attempts if order appears in both loops', async () => {
+      const candidates: OrderCandidate[] = [{ order_id: 'o1', order_number: '101', raw_status: 'Pendente', raw_codsit: null }];
+      (deps.ordersRepo as any).findOrdersWithoutDetail.mockResolvedValue(candidates);
+      (deps.ordersRepo as any).findActiveOrders.mockResolvedValue(candidates);
+      (deps.detailProvider as any).getOrderDetail.mockRejectedValue(new Error('Internal Server Error 500'));
+
+      const engine = new OrdersSync(deps);
+      const result = await engine.execute(context);
+
+      // Should only attempt once even though it was returned by both methods
+      expect(deps.detailProvider.getOrderDetail).toHaveBeenCalledTimes(1);
+      expect(result.metrics?.hydration_errors).toBe(1);
+    });
+
+    it('should retry failed orders in subsequent executions', async () => {
+      const candidates: OrderCandidate[] = [{ order_id: 'o1', order_number: '101', raw_status: 'Pendente', raw_codsit: null }];
+      (deps.ordersRepo as any).findOrdersWithoutDetail.mockResolvedValue(candidates);
+      
+      let attempts = 0;
+      (deps.detailProvider as any).getOrderDetail.mockImplementation(() => {
+        attempts++;
+        if (attempts === 1) return Promise.reject(new Error('Failed on first run'));
+        return Promise.resolve({ situacao: 'ok' });
+      });
+
+      const engine = new OrdersSync(deps);
+      
+      // First run - fails
+      const result1 = await engine.execute(context);
+      expect(result1.success).toBe(true);
+      expect(result1.metrics?.hydration_errors).toBe(1);
+      expect(deps.detailsRepo.upsert).not.toHaveBeenCalled();
+
+      // Second run - succeeds (simulating that the repository still returns the candidate)
+      const result2 = await engine.execute(context);
+      expect(result2.success).toBe(true);
+      expect(result2.metrics?.hydration_errors).toBe(0);
+      expect(result2.metrics?.hydrated).toBe(1);
+      expect(deps.detailsRepo.upsert).toHaveBeenCalledTimes(1);
+    });
   });
 });

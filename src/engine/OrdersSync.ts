@@ -109,7 +109,7 @@ export class OrdersSync implements IJob {
       await this.deps.ordersRepo.upsertMany(orderRecords);
 
       const missingDetail = await this.deps.ordersRepo.findOrdersWithoutDetail();
-      const hydratedIds = new Set<string>();
+      const attemptedIds = new Set<string>();
 
       for (const candidate of missingDetail) {
         if (abortSignal.aborted) break;
@@ -120,10 +120,10 @@ export class OrdersSync implements IJob {
           continue;
         }
 
+        attemptedIds.add(candidate.order_id);
         const ok = await this.hydrateOrder(candidate.order_number, abortSignal);
         if (ok) {
           hydratedCount++;
-          hydratedIds.add(candidate.order_id);
         } else {
           errors++;
         }
@@ -139,7 +139,8 @@ export class OrdersSync implements IJob {
             continue;
           }
           
-          if (!hydratedIds.has(candidate.order_id)) {
+          if (!attemptedIds.has(candidate.order_id)) {
+            attemptedIds.add(candidate.order_id);
             const ok = await this.hydrateOrder(candidate.order_number, abortSignal);
             if (ok) hydratedCount++;
             else errors++;

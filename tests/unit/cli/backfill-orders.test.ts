@@ -103,4 +103,77 @@ describe('BackfillOrchestrator', () => {
     expect(result.success).toBe(false);
     expect(deps.stateRepo.upsert).not.toHaveBeenCalled();
   });
+
+  it('persists cursor when only ORD-002 hydration fails (partial success)', async () => {
+    // Force OrdersSync to succeed but return hydration_errors
+    deps.ordersProvider.getOrders.mockResolvedValue([{ 'nr-pedido': '101' }]);
+    deps.detailProvider.getOrderDetail.mockRejectedValue(new Error('Internal Server Error 500'));
+    deps.ordersRepo.findOrdersWithoutDetail.mockResolvedValue([{ order_id: '1', order_number: '1' }]);
+    
+    // Setup state
+    deps.stateRepo.findByKey.mockResolvedValue({ cursor_value: JSON.stringify({ lastEndDate: '2020-01-31T00:00:00Z' }) } as SyncState);
+
+    const orchestrator = new BackfillOrchestrator(deps);
+    const result = await orchestrator.run(1); // just run 1 window for this test
+
+    expect(result.windowsProcessed).toBe(1);
+    expect(result.success).toBe(true);
+    expect(deps.stateRepo.upsert).toHaveBeenCalledTimes(1);
+    expect(result.totalErrors).toBe(1); // Reflects hydration error
+  });
+
+  it('does not advance cursor if ORD-001 fails', async () => {
+    deps.ordersProvider.getOrders.mockRejectedValue(new Error('API Timeout'));
+    
+    deps.stateRepo.findByKey.mockResolvedValue({ cursor_value: JSON.stringify({ lastEndDate: '2020-01-31T00:00:00Z' }) } as SyncState);
+
+    const orchestrator = new BackfillOrchestrator(deps);
+    const result = await orchestrator.run(1);
+
+    expect(result.windowsProcessed).toBe(0);
+    expect(result.success).toBe(false);
+    expect(deps.stateRepo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('does not advance cursor if lease is lost before update', async () => {
+    // Make renew fail when it tries to renew right before state advancement
+    deps.leaseRepo.renew.mockResolvedValue(false);
+    
+    deps.stateRepo.findByKey.mockResolvedValue({ cursor_value: JSON.stringify({ lastEndDate: '2020-01-31T00:00:00Z' }) } as SyncState);
+
+    const orchestrator = new BackfillOrchestrator(deps);
+    const result = await orchestrator.run(1);
+
+    expect(result.windowsProcessed).toBe(0);
+    expect(result.success).toBe(false); // Loop success becomes false
+    expect(deps.stateRepo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('accumulates metrics correctly across multiple windows', async () => {
+    let windowIndex = 0;
+    const cursors = [
+      '2020-01-31T00:00:00Z',
+      '2020-03-01T00:00:00.000Z',
+      '2020-03-31T00:00:00.000Z'
+    ];
+    deps.stateRepo.findByKey.mockImplementation(() => {
+      return Promise.resolve({ cursor_value: JSON.stringify({ lastEndDate: cursors[windowIndex] }) } as SyncState);
+    });
+    deps.stateRepo.upsert.mockImplementation(() => {
+      windowIndex++;
+      return Promise.resolve();
+    });
+
+    deps.ordersProvider.getOrders.mockResolvedValue([{ 'nr-pedido': '101' }]);
+    deps.ordersRepo.findOrdersWithoutDetail.mockResolvedValue([{ order_id: '1', order_number: '101', raw_status: 'Pendente' }]);
+    deps.detailProvider.getOrderDetail.mockResolvedValue({ situacao: 'ok' });
+
+    const orchestrator = new BackfillOrchestrator(deps);
+    const result = await orchestrator.run(2);
+
+    expect(result.windowsProcessed).toBe(2);
+    expect(result.totalDiscovered).toBe(2); // 1 per window
+    expect(result.totalHydrated).toBe(2); // 1 per window
+    expect(result.totalErrors).toBe(0);
+  });
 });
