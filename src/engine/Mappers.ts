@@ -209,6 +209,49 @@ export class ProductMapper {
 // ============================================================
 
 export class ReceivableMapper {
+  private static parseZeissDate(val: unknown): string | null {
+    if (typeof val !== 'string' || val.trim() === '') return null;
+    const str = val.trim();
+    
+    let year: number, month: number, day: number;
+
+    // Check if it's YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+      const parts = str.split('-');
+      year = parseInt(parts[0], 10);
+      month = parseInt(parts[1], 10);
+      day = parseInt(parts[2], 10);
+    } 
+    // Check if it's DD/MM/YYYY
+    else if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
+      const parts = str.split('/');
+      day = parseInt(parts[0], 10);
+      month = parseInt(parts[1], 10);
+      year = parseInt(parts[2], 10);
+    } else {
+      throw new ContractMappingError(`FIN-001 Contract Violation: Invalid date format received from source: '${str}'`);
+    }
+
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+      throw new ContractMappingError(`FIN-001 Contract Violation: Impossible date received from source: '${str}'`);
+    }
+
+    // Construct UTC date and verify strict calendar correctness to prevent silent rollover
+    const dateObj = new Date(Date.UTC(year, month - 1, day));
+    if (
+      dateObj.getUTCFullYear() !== year ||
+      dateObj.getUTCMonth() !== month - 1 ||
+      dateObj.getUTCDate() !== day
+    ) {
+      throw new ContractMappingError(`FIN-001 Contract Violation: Impossible date received from source: '${str}'`);
+    }
+
+    const yy = String(year).padStart(4, '0');
+    const mm = String(month).padStart(2, '0');
+    const dd = String(day).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
+  }
+
   static normalize(raw: unknown): ReceivableRecord {
     if (!raw || typeof raw !== 'object') {
       throw new ContractMappingError('Invalid receivable payload: expected object');
@@ -235,11 +278,32 @@ export class ReceivableMapper {
       }
     }
 
+    let emission: string | null = null;
+    if (typeof rawObj.emissao === 'string' && rawObj.emissao.trim() !== '') {
+      try {
+        emission = ReceivableMapper.parseZeissDate(rawObj.emissao);
+      } catch (err) {
+        throw new ContractMappingError(`FIN-001 Contract Violation: Invalid emission_date received from source: '${rawObj.emissao}'`);
+      }
+    }
+
+    let due: string | null = null;
+    const rawDue = typeof rawObj.vencimento === 'string' && rawObj.vencimento.trim() !== '' ? rawObj.vencimento : 
+                  (typeof rawObj.vencimentoqad === 'string' && rawObj.vencimentoqad.trim() !== '' ? rawObj.vencimentoqad : null);
+    
+    if (rawDue) {
+      try {
+        due = ReceivableMapper.parseZeissDate(rawDue);
+      } catch (err) {
+        throw new ContractMappingError(`FIN-001 Contract Violation: Invalid due_date received from source: '${rawDue}'`);
+      }
+    }
+
     return {
       boleto_number: boleto,
       fiscal_reference: typeof rawObj.identificadornf === 'string' ? rawObj.identificadornf : null,
-      emission_date: typeof rawObj.emissao === 'string' ? rawObj.emissao : null,
-      due_date: typeof rawObj.vencimento === 'string' ? rawObj.vencimento : (typeof rawObj.vencimentoqad === 'string' ? rawObj.vencimentoqad : null),
+      emission_date: emission,
+      due_date: due,
       amount: amountString,
       status: typeof rawObj.status === 'string' ? rawObj.status : null,
       order_id: undefined // mapped later by joining against fiscal_documents if needed

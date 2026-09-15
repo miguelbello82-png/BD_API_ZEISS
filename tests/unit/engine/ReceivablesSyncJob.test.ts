@@ -47,7 +47,7 @@ describe('ReceivablesSyncJob', () => {
 
   it('fails with BOOTSTRAP_REQUIRED if cursor is missing', async () => {
     const result = await job.execute(context);
-    expect(result.success).toBe(false);
+    console.log(JSON.stringify(result, null, 2)); expect(result.success).toBe(false);
     expect(result.error?.message).toContain('BOOTSTRAP_REQUIRED');
   });
 
@@ -57,6 +57,75 @@ describe('ReceivablesSyncJob', () => {
     expect(result.success).toBe(false);
     expect(result.error?.message).toContain('CURSOR_ERROR');
     expect(result.error?.message).toContain('malformed JSON');
+  });
+
+  it('fails with CURSOR_ERROR if cursor date is invalid', async () => {
+    context.lastSyncState = { cursor_value: JSON.stringify({ lastEndDate: '2026-99-99' }) } as any;
+    const result = await job.execute(context);
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toContain('CURSOR_ERROR');
+  });
+
+  it('blocks cursor advancement if zeiss returns an invalid date', async () => {
+    context.lastSyncState = { cursor_value: JSON.stringify({ lastEndDate: '2026-01-01' }) } as any;
+    
+    // Valid object except emission_date is invalid
+    provider.getReceivables.mockResolvedValue([
+      {
+        boleto: '12345',
+        emissao: 'NOT_A_DATE',
+        valor: '100.50'
+      }
+    ]);
+
+    const result = await job.execute(context);
+    
+    // Result fails because mapper threw an error, incrementing errors counter
+    expect(result.success).toBe(false);
+    expect(result.metrics?.errors).toBe(1);
+    expect(repo.upsertMany).toHaveBeenCalledWith([]); // None valid
+  });
+
+  it('blocks cursor advancement if zeiss returns another kind of invalid date', async () => {
+    context.lastSyncState = { cursor_value: JSON.stringify({ lastEndDate: '2026-01-01' }) } as any;
+    
+    provider.getReceivables.mockResolvedValue([
+      {
+        boleto: '12345',
+        vencimento: '25/13/2026', // invalid month
+        valor: '100.50'
+      }
+    ]);
+
+    const result = await job.execute(context);
+    
+    expect(result.success).toBe(false);
+    expect(result.metrics?.errors).toBe(1);
+  });
+
+  it('advances cursor successfully with DD/MM/YYYY format dates', async () => {
+    context.lastSyncState = { cursor_value: JSON.stringify({ lastEndDate: '2026-01-01' }) } as any;
+    
+    provider.getReceivables.mockResolvedValue([
+      {
+        boleto: '12345',
+        emissao: '05/07/2026',
+        vencimento: '04/08/2026',
+        valor: '100.50'
+      }
+    ]);
+
+    const result = await job.execute(context);
+    
+    expect(result.success).toBe(true);
+    expect(result.metrics?.errors).toBe(0);
+    expect(result.metrics?.synced).toBe(1);
+    expect(repo.upsertMany).toHaveBeenCalledWith([
+      expect.objectContaining({
+        emission_date: '2026-07-05',
+        due_date: '2026-08-04'
+      })
+    ]);
   });
 
   it('fails with CURSOR_ERROR if cursor lacks lastEndDate', async () => {

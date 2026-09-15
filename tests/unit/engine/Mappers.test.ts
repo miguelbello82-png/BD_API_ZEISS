@@ -1,4 +1,4 @@
-import { OrdersMapper, OrderDetailMapper, TrackingMapper, CampaignMapper, ContractMappingError } from '../../../src/engine/Mappers';
+import { OrdersMapper, OrderDetailMapper, TrackingMapper, CampaignMapper, ReceivableMapper, ContractMappingError } from '../../../src/engine/Mappers';
 
 describe('Mappers', () => {
   describe('OrdersMapper', () => {
@@ -140,6 +140,40 @@ describe('Mappers', () => {
     it('throws ContractMappingError on malformed dates', () => {
       const payload = { idcampanha: '1', datainicial: '2023/06/25' };
       expect(() => CampaignMapper.normalize(payload)).toThrow(ContractMappingError);
+    });
+  });
+
+  describe('ReceivableMapper (FIN-001 strict calendar validation)', () => {
+    it('normalizes valid dates to YYYY-MM-DD', () => {
+      const validCases = [
+        { input: '05/07/2026', expected: '2026-07-05' },
+        { input: '29/02/2024', expected: '2024-02-29' },
+        { input: '2026-08-04', expected: '2026-08-04' }
+      ];
+
+      for (const t of validCases) {
+        const payload = { boleto: '123', vencimento: t.input, valor: '100.00' };
+        const result = ReceivableMapper.normalize(payload);
+        expect(result.due_date).toBe(t.expected);
+      }
+    });
+
+    it('throws ContractMappingError on impossible dates (preventing silent rollover)', () => {
+      const invalidCases = [
+        '31/02/2026',
+        '29/02/2025',
+        '00/07/2026',
+        '15/13/2026',
+        '2026-02-31',
+        '2025-02-29',
+        '2026-00-10',
+        'malformed string'
+      ];
+
+      for (const input of invalidCases) {
+        const payload = { boleto: '123', vencimento: input, valor: '100.00' };
+        expect(() => ReceivableMapper.normalize(payload)).toThrow(ContractMappingError);
+      }
     });
   });
 });
