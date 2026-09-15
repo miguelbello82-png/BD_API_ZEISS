@@ -119,5 +119,19 @@ describe('OrdersSync Engine', () => {
       expect(deps.detailProvider.getOrderDetail).toHaveBeenCalledWith('101', context.abortSignal);
       expect(deps.detailsRepo.upsert).toHaveBeenCalled();
     });
+
+    it('should not block discovery cursor advancement if hydration fails', async () => {
+      const candidates: OrderCandidate[] = [{ order_id: 'o1', order_number: '101', raw_status: 'Pendente', raw_codsit: null }];
+      (deps.ordersRepo as any).findOrdersWithoutDetail.mockResolvedValue(candidates);
+      (deps.detailProvider as any).getOrderDetail.mockRejectedValue(new Error('Internal Server Error 500'));
+
+      const engine = new OrdersSync(deps);
+      const result = await engine.execute(context);
+
+      expect(deps.detailProvider.getOrderDetail).toHaveBeenCalledWith('101', context.abortSignal);
+      expect(deps.detailsRepo.upsert).not.toHaveBeenCalled();
+      expect(result.success).toBe(true); // Must still be true to allow cursor advancement
+      expect(result.metrics?.hydration_errors).toBe(1);
+    });
   });
 });

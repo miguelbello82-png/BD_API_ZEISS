@@ -142,7 +142,7 @@ export class BackfillOrchestrator {
         if (result.metrics) {
           totalDiscovered += result.metrics.discovered || 0;
           totalHydrated += result.metrics.hydrated || 0;
-          totalErrors += result.metrics.errors || 0;
+          totalErrors += result.metrics.hydration_errors || 0;
         }
         currentCursor = newCursor;
       }

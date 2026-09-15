@@ -155,13 +155,13 @@ export class OrdersSync implements IJob {
     }
 
     return {
-      success: errors === 0, // Partial success treated as failure for retryability
-      retryable: true, // DB errors or partial hydration errors are retryable
+      success: true, // ORD-001 discovery success is independent from ORD-002 hydration failures
+      retryable: true, 
       cursorValue: JSON.stringify({ lastEndDate: slice.endDate }),
       metrics: {
         discovered: rawOrders.length,
         hydrated: hydratedCount,
-        errors
+        hydration_errors: errors
       }
     };
   }
