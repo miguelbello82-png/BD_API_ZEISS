@@ -26,6 +26,17 @@ Os apps consumidores:
 - NÃO controlam scheduler.
 - NÃO duplicam regras de sincronização.
 
+### Regra Permanente de Fontes Canônicas de Evidência
+
+As fontes canônicas de evidência do BD_API_ZEISS limitam-se exclusivamente a:
+- Contratos e documentações oficiais da ZEISS;
+- Respostas reais de APIs da ZEISS obtidas por esta plataforma;
+- Evidências de banco de dados e runtime do BD_API_ZEISS;
+- Especificações e implementação do BD_API_ZEISS.
+
+Artefatos de aplicações consumidoras (como Suite RMG, Mais ZEISS, app_suite) NUNCA são fontes de evidência.
+Códigos ou documentos legados de consumidores jamais devem ser consultados para preencher lacunas de evidência (evidence gaps); lacunas não comprovadas canonicamente devem ser formalmente marcadas como `UNRESOLVED`.
+
 ---
 
 ## 2. MODELO DE EXECUÇÃO: STATE-DRIVEN

@@ -6,7 +6,7 @@ Este documento consolida as evidências do contrato da ZEISS para classificar o 
 
 ## 1. ORDERS PAYLOAD FIELDS
 
-Com base na inspeção do documento de Inteligência (`Suite_RMG_API_Intelligence_v0.25.0.md`) e do provider:
+Com base na inspeção dos contratos oficiais da ZEISS, dos provedores da plataforma BD_API_ZEISS e das respostas reais de API observadas em tempo de execução:
 
 ### ORD-001 (Listagem)
 Os principais campos que indicam o progresso e o estado do pedido são:
