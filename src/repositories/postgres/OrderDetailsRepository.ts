@@ -15,12 +15,24 @@ export class PgOrderDetailsRepository implements IOrderDetailsRepository {
       }
       const orderId = orders[0].id;
 
+      // Update parent order dates (using COALESCE so we never erase an existing date)
+      if (detail.entry_date || detail.expected_date) {
+        const updateDatesQuery = `
+          UPDATE zeiss.orders
+          SET
+            entry_date = COALESCE($1, entry_date),
+            expected_date = COALESCE($2, expected_date)
+          WHERE id = $3
+        `;
+        await client.query(updateDatesQuery, [detail.entry_date || null, detail.expected_date || null, orderId]);
+      }
+
       // Upsert detail (using order_id as foreign key constraint, assuming unique on order_id)
       const detailQuery = `
         INSERT INTO zeiss.order_details (order_id, raw_status, raw_situacao, updated_at)
         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
         ON CONFLICT (order_id)
-        DO UPDATE SET 
+        DO UPDATE SET
           raw_status = EXCLUDED.raw_status,
           raw_situacao = EXCLUDED.raw_situacao,
           updated_at = CURRENT_TIMESTAMP
@@ -44,7 +56,7 @@ export class PgOrderDetailsRepository implements IOrderDetailsRepository {
 
   async exists(orderNumber: string): Promise<boolean> {
     const query = `
-      SELECT 1 
+      SELECT 1
       FROM zeiss.order_details od
       JOIN zeiss.orders o ON o.id = od.order_id
       WHERE o.order_number = $1

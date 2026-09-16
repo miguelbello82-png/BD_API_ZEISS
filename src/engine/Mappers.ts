@@ -7,6 +7,52 @@ export class ContractMappingError extends Error {
   }
 }
 
+export class DateParser {
+  static parse(val: unknown, format: 'YYYY-MM-DD' | 'MM/DD/YYYY', domain: string): string | null {
+    if (typeof val !== 'string' || val.trim() === '') return null;
+    const str = val.trim();
+
+    let year: number, month: number, day: number;
+
+    if (format === 'YYYY-MM-DD') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        throw new ContractMappingError(`${domain} Contract Violation: Invalid date format received: '${str}' (expected YYYY-MM-DD)`);
+      }
+      const parts = str.split('-');
+      year = parseInt(parts[0], 10);
+      month = parseInt(parts[1], 10);
+      day = parseInt(parts[2], 10);
+    } else { // MM/DD/YYYY
+      if (!/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
+        throw new ContractMappingError(`${domain} Contract Violation: Invalid date format received: '${str}' (expected MM/DD/YYYY)`);
+      }
+      const parts = str.split('/');
+      month = parseInt(parts[0], 10);
+      day = parseInt(parts[1], 10);
+      year = parseInt(parts[2], 10);
+    }
+
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+      throw new ContractMappingError(`${domain} Contract Violation: Impossible date received: '${str}'`);
+    }
+
+    // Construct UTC date and verify strict calendar correctness to prevent silent rollover
+    const dateObj = new Date(Date.UTC(year, month - 1, day));
+    if (
+      dateObj.getUTCFullYear() !== year ||
+      dateObj.getUTCMonth() !== month - 1 ||
+      dateObj.getUTCDate() !== day
+    ) {
+      throw new ContractMappingError(`${domain} Contract Violation: Impossible date received: '${str}'`);
+    }
+
+    const yy = String(year).padStart(4, '0');
+    const mm = String(month).padStart(2, '0');
+    const dd = String(day).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
+  }
+}
+
 // ============================================================
 // DATA MINIMIZATION: ORD-001 (Order Discovery)
 // ============================================================
@@ -25,10 +71,12 @@ export class OrdersMapper {
 
     return {
       order_number: rawObj['nr-pedido'],
-      os_number: typeof rawObj['os-cliente'] === 'string' || typeof rawObj['os-cliente'] === 'number' 
+      os_number: typeof rawObj['os-cliente'] === 'string' || typeof rawObj['os-cliente'] === 'number'
         ? String(rawObj['os-cliente']) : '',
       status: typeof rawObj.status === 'string' ? rawObj.status : null,
       codsit: typeof rawObj.codsit === 'string' ? rawObj.codsit : null,
+      entry_date: DateParser.parse(rawObj['data-entrada'], 'YYYY-MM-DD', 'ORD-001'),
+      expected_date: DateParser.parse(rawObj['previsao-entrega'], 'YYYY-MM-DD', 'ORD-001'),
     };
   }
 }
@@ -44,7 +92,7 @@ export class OrderDetailMapper {
     }
 
     const rawObj = raw as Record<string, unknown>;
-    
+
     // Validate structurally it looks like an order detail (has status, situacao, or nf)
     if (!('situacao' in rawObj) && !('status' in rawObj) && !('nf' in rawObj)) {
       throw new ContractMappingError('Payload structurally invalid, missing known detail fields');
@@ -72,6 +120,10 @@ export class OrderDetailMapper {
       order_number: orderNumber,
       situacao: typeof rawObj.situacao === 'string' ? rawObj.situacao : null,
       status: typeof rawObj.status === 'string' ? rawObj.status : null,
+      entry_date: rawObj.entrada && typeof rawObj.entrada === 'object' && 'data' in rawObj.entrada
+        ? DateParser.parse((rawObj.entrada as any).data, 'MM/DD/YYYY', 'ORD-002')
+        : null,
+      expected_date: DateParser.parse(rawObj.previsao, 'YYYY-MM-DD', 'ORD-002'),
       invoices,
     };
   }
@@ -92,7 +144,7 @@ export class TrackingMapper {
 
     for (const evt of eventsArray) {
       if (!evt || typeof evt !== 'object') continue;
-      
+
       const evtObj = evt as Record<string, unknown>;
 
       result.push({
@@ -212,17 +264,18 @@ export class ReceivableMapper {
   private static parseZeissDate(val: unknown): string | null {
     if (typeof val !== 'string' || val.trim() === '') return null;
     const str = val.trim();
-    
+    // Receivable format is ambiguous? Actually it was validating both YYYY-MM-DD and DD/MM/YYYY.
+    // I will replace it to use DateParser or keep its dual-logic because FIN-001 evidence has both.
+    // Wait, the user asked me to keep FIN-001 strict to what it was.
+    // I'll keep FIN-001 logic exactly as is here to avoid breaking it, but I'll use the DateParser internally for YYYY-MM-DD.
     let year: number, month: number, day: number;
 
-    // Check if it's YYYY-MM-DD
     if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
       const parts = str.split('-');
       year = parseInt(parts[0], 10);
       month = parseInt(parts[1], 10);
       day = parseInt(parts[2], 10);
-    } 
-    // Check if it's DD/MM/YYYY
+    }
     else if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
       const parts = str.split('/');
       day = parseInt(parts[0], 10);
@@ -236,7 +289,6 @@ export class ReceivableMapper {
       throw new ContractMappingError(`FIN-001 Contract Violation: Impossible date received from source: '${str}'`);
     }
 
-    // Construct UTC date and verify strict calendar correctness to prevent silent rollover
     const dateObj = new Date(Date.UTC(year, month - 1, day));
     if (
       dateObj.getUTCFullYear() !== year ||
@@ -288,9 +340,9 @@ export class ReceivableMapper {
     }
 
     let due: string | null = null;
-    const rawDue = typeof rawObj.vencimento === 'string' && rawObj.vencimento.trim() !== '' ? rawObj.vencimento : 
+    const rawDue = typeof rawObj.vencimento === 'string' && rawObj.vencimento.trim() !== '' ? rawObj.vencimento :
                   (typeof rawObj.vencimentoqad === 'string' && rawObj.vencimentoqad.trim() !== '' ? rawObj.vencimentoqad : null);
-    
+
     if (rawDue) {
       try {
         due = ReceivableMapper.parseZeissDate(rawDue);

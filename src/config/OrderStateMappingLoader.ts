@@ -8,6 +8,7 @@ export interface OrderStateMappingConfig {
   };
   billed: {
     codsit: string[];
+    status?: string[];
   };
 }
 
@@ -47,7 +48,7 @@ export class OrderStateMappingLoader {
     if (!cancelledObj || typeof cancelledObj !== 'object') {
       throw new Error('OrderStateMappingLoader: Missing or invalid "cancelled" block');
     }
-    
+
     if (cancelledObj.field !== 'status' && cancelledObj.field !== 'codsit') {
       throw new Error('OrderStateMappingLoader: "cancelled.field" must be strictly "status" or "codsit"');
     }
@@ -71,6 +72,15 @@ export class OrderStateMappingLoader {
 
     if (billedObj.codsit.some((v: unknown) => typeof v !== 'string' || v.trim() === '')) {
       throw new Error('OrderStateMappingLoader: "billed.codsit" must contain only non-empty strings');
+    }
+
+    if (billedObj.status !== undefined) {
+      if (!Array.isArray(billedObj.status)) {
+        throw new Error('OrderStateMappingLoader: "billed.status" must be an array if provided');
+      }
+      if (billedObj.status.some((v: unknown) => typeof v !== 'string' || v.trim() === '')) {
+        throw new Error('OrderStateMappingLoader: "billed.status" must contain only non-empty strings');
+      }
     }
   }
 }

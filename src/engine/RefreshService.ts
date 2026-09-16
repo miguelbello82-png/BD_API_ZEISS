@@ -134,7 +134,7 @@ export class RefreshService {
 
     try {
       const candidates = await this.deps.trackingRepo.findTrackingCandidatesForOrder(orderNumber);
-      
+
       if (!candidates || candidates.length === 0) {
         result.errors.push('Cannot refresh tracking: Order candidate not found');
         result.success = false;
@@ -142,9 +142,10 @@ export class RefreshService {
       }
 
       for (const candidate of candidates) {
-        const stateInput: OrderStateInput = { 
-          status: candidate.raw_order_status, 
-          codsit: candidate.raw_order_codsit 
+        const stateInput: OrderStateInput = {
+          status: candidate.raw_order_status,
+          codsit: candidate.raw_order_codsit,
+          detail_status: candidate.detail_status
         };
 
         if (this.deps.orderClassifier.isMutable(stateInput)) {

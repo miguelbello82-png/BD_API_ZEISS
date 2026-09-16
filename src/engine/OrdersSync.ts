@@ -50,7 +50,7 @@ export class OrdersSync implements IJob {
     const { abortSignal, lastSyncState, policy } = context;
 
     this.deps.logger.info(OrdersSync.COMPONENT, 'Starting orders discovery job');
-    
+
     let lastEndDate: string | undefined;
     if (lastSyncState && lastSyncState.cursor_value) {
       try {
@@ -71,8 +71,8 @@ export class OrdersSync implements IJob {
     }
 
     const slice = OrdersDiscoveryPlanner.planNextSlice(
-      lastEndDate, 
-      { maxRangeDays: config.maxRangeDays as number }, 
+      lastEndDate,
+      { maxRangeDays: config.maxRangeDays as number },
       this.deps.clock.now()
     );
 
@@ -114,7 +114,11 @@ export class OrdersSync implements IJob {
       for (const candidate of missingDetail) {
         if (abortSignal.aborted) break;
 
-        const stateInput: OrderStateInput = { status: candidate.raw_status, codsit: candidate.raw_codsit };
+        const stateInput: OrderStateInput = {
+          status: candidate.raw_status,
+          codsit: candidate.raw_codsit,
+          detail_status: candidate.detail_status
+        };
         if (this.deps.classifier.isCancelled(stateInput)) {
           this.deps.logger.info(OrdersSync.COMPONENT, 'Skipping hydration for cancelled order', { orderNumber: candidate.order_number });
           continue;
@@ -134,11 +138,17 @@ export class OrdersSync implements IJob {
         for (const candidate of candidates) {
           if (abortSignal.aborted) break;
 
-          const stateInput: OrderStateInput = { status: candidate.raw_status, codsit: candidate.raw_codsit };
+          // Preserve ORD-001 status for cancellation precedence, but use detail_status if present for billed check
+          // Actually, we pass both to classifier.
+          const stateInput: OrderStateInput = {
+            status: candidate.raw_status,
+            codsit: candidate.raw_codsit,
+            detail_status: candidate.detail_status
+          };
           if (!this.deps.classifier.isMutable(stateInput)) {
             continue;
           }
-          
+
           if (!attemptedIds.has(candidate.order_id)) {
             attemptedIds.add(candidate.order_id);
             const ok = await this.hydrateOrder(candidate.order_number, abortSignal);
@@ -157,7 +167,7 @@ export class OrdersSync implements IJob {
 
     return {
       success: true, // ORD-001 discovery success is independent from ORD-002 hydration failures
-      retryable: true, 
+      retryable: true,
       cursorValue: JSON.stringify({ lastEndDate: slice.endDate }),
       metrics: {
         discovered: rawOrders.length,

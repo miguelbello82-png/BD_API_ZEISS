@@ -9,7 +9,10 @@ describe('ZeissOrderClassifier', () => {
   beforeEach(() => {
     mockConfig = {
       cancelled: { field: 'status', values: ['Cancelado'] },
-      billed: { codsit: ['6.1'] }
+      billed: {
+        codsit: ['6.1'],
+        status: ['Faturado - Aguardando processo logístico']
+      }
     };
     classifier = new ZeissOrderClassifier(mockConfig);
   });
@@ -58,5 +61,45 @@ describe('ZeissOrderClassifier', () => {
   it('classifies null or missing state as UNKNOWN', () => {
     expect(classifier.classify({} as any)).toBe(OrderLifecycleStage.UNKNOWN);
     expect(classifier.isMutable({} as any)).toBe(true);
+  });
+
+  describe('Authority Cases', () => {
+    it('CASE A: ORD-002 detail overrides ORD-001 non-billed to BILLED_LOGISTICS_READY', () => {
+      const state: OrderStateInput = {
+        status: 'Estoque',
+        codsit: '1.1',
+        detail_status: 'Faturado - Aguardando processo logístico'
+      };
+      expect(classifier.classify(state)).toBe(OrderLifecycleStage.BILLED_LOGISTICS_READY);
+      expect(classifier.isBilledLogisticsReady(state)).toBe(true);
+    });
+
+    it('CASE B: ORD-002 detail overrides ORD-001 billed codsit to MUTABLE (CRITICAL)', () => {
+      const state: OrderStateInput = {
+        status: 'Faturado - Aguardando processo logístico',
+        codsit: '6.1',
+        detail_status: 'Montagem'
+      };
+      // Because detail_status is Montagem (not billed), it should NOT fall back to 6.1
+      expect(classifier.classify(state)).toBe(OrderLifecycleStage.UNKNOWN);
+      expect(classifier.isBilledLogisticsReady(state)).toBe(false);
+      expect(classifier.isMutable(state)).toBe(true);
+    });
+
+    it('CASE C: Cancelado has precedence over ORD-002 any status', () => {
+      const state1: OrderStateInput = {
+        status: 'Cancelado',
+        codsit: '',
+        detail_status: 'Faturado - Aguardando processo logístico'
+      };
+      expect(classifier.classify(state1)).toBe(OrderLifecycleStage.CANCELLED);
+
+      const state2: OrderStateInput = {
+        status: 'Cancelado',
+        codsit: '6.1',
+        detail_status: 'Montagem'
+      };
+      expect(classifier.classify(state2)).toBe(OrderLifecycleStage.CANCELLED);
+    });
   });
 });

@@ -7,6 +7,7 @@
 export interface OrderStateInput {
   status: string | null;
   codsit: string | null;
+  detail_status?: string | null;
 }
 
 export interface TrackingStateInput {
@@ -22,6 +23,7 @@ export interface OrderCandidate {
   order_number: string;
   raw_status: string | null;
   raw_codsit: string | null;
+  detail_status?: string | null;
 }
 
 export interface OrderRecord {
@@ -29,6 +31,8 @@ export interface OrderRecord {
   os_number: string;
   status: string | null;
   codsit: string | null;
+  entry_date?: string | null;
+  expected_date?: string | null;
   created_at?: Date;
   updated_at?: Date;
 }
@@ -42,6 +46,8 @@ export interface OrderDetailRecord {
   order_number: string;
   situacao: string | null;
   status: string | null;
+  entry_date?: string | null;
+  expected_date?: string | null;
   invoices: InvoiceReference[];
 }
 
@@ -50,6 +56,7 @@ export interface TrackingCandidate {
   order_number: string;
   raw_order_status: string | null;
   raw_order_codsit: string | null;
+  detail_status?: string | null;
   nf_number: string;
   tracking_state: TrackingStateInput | null;
 }

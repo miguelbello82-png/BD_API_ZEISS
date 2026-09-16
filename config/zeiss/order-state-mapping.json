@@ -4,6 +4,7 @@
     "values": ["Cancelado"]
   },
   "billed": {
-    "codsit": ["6.1"]
+    "codsit": ["6.1"],
+    "status": ["Faturado - Aguardando processo logístico"]
   }
 }

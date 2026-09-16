@@ -24,7 +24,7 @@ export interface IOrderClassifier {
 
   /** True if the order is billed and ready for logistics tracking. */
   isBilledLogisticsReady(state: OrderStateInput): boolean;
-  
+
   /** True if the order is officially cancelled. */
   isCancelled(state: OrderStateInput): boolean;
 }
@@ -43,7 +43,20 @@ export class ZeissOrderClassifier implements IOrderClassifier {
       return OrderLifecycleStage.CANCELLED;
     }
 
+    // Detail status is the authoritative status if available
+    if (state.detail_status !== undefined && state.detail_status !== null) {
+      if (this.config.billed.status && this.config.billed.status.includes(state.detail_status)) {
+        return OrderLifecycleStage.BILLED_LOGISTICS_READY;
+      }
+      return OrderLifecycleStage.UNKNOWN; // Not billed, not cancelled.
+    }
+
+    // Fallback to ORD-001 checks
     if (state.codsit && this.config.billed.codsit.includes(state.codsit)) {
+      return OrderLifecycleStage.BILLED_LOGISTICS_READY;
+    }
+
+    if (state.status && this.config.billed.status && this.config.billed.status.includes(state.status)) {
       return OrderLifecycleStage.BILLED_LOGISTICS_READY;
     }
 
@@ -59,7 +72,7 @@ export class ZeissOrderClassifier implements IOrderClassifier {
   isBilledLogisticsReady(state: OrderStateInput): boolean {
     return this.classify(state) === OrderLifecycleStage.BILLED_LOGISTICS_READY;
   }
-  
+
   isCancelled(state: OrderStateInput): boolean {
     return this.classify(state) === OrderLifecycleStage.CANCELLED;
   }

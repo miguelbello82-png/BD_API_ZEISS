@@ -1,4 +1,4 @@
-import { OrdersMapper, OrderDetailMapper, TrackingMapper, CampaignMapper, ReceivableMapper, ContractMappingError } from '../../../src/engine/Mappers';
+import { DateParser, OrdersMapper, OrderDetailMapper, TrackingMapper, CampaignMapper, ReceivableMapper, ContractMappingError } from '../../../src/engine/Mappers';
 
 describe('Mappers', () => {
   describe('OrdersMapper', () => {
@@ -10,11 +10,22 @@ describe('Mappers', () => {
         codsit: '6.1',
         id: 'fake-id' // Should be ignored
       };
-      
+
       const record = OrdersMapper.normalizeOrderListItem(raw);
       expect(record.order_number).toBe('123');
       expect((record as any).id).toBeUndefined(); // ensure id is not present
       expect(record.status).toBe('Faturado');
+    });
+
+    it('parses ORD-001 dates strictly', () => {
+      const raw = {
+        'nr-pedido': '123',
+        'data-entrada': '2026-09-15',
+        'previsao-entrega': '2026-09-16'
+      };
+      const record = OrdersMapper.normalizeOrderListItem(raw);
+      expect(record.entry_date).toBe('2026-09-15');
+      expect(record.expected_date).toBe('2026-09-16');
     });
   });
 
@@ -34,6 +45,17 @@ describe('Mappers', () => {
       const raw = { situacao: 'Faturado', nf: [] };
       const detail = OrderDetailMapper.minimize('100', raw);
       expect(detail.invoices.length).toBe(0);
+    });
+
+    it('parses ORD-002 dates strictly', () => {
+      const raw = {
+        situacao: 'Faturado',
+        entrada: { data: '09/15/2026' },
+        previsao: '2026-09-16'
+      };
+      const detail = OrderDetailMapper.minimize('100', raw);
+      expect(detail.entry_date).toBe('2026-09-15');
+      expect(detail.expected_date).toBe('2026-09-16');
     });
 
     it('payload estruturalmente invalido -> ContractMappingError', () => {
@@ -174,6 +196,26 @@ describe('Mappers', () => {
         const payload = { boleto: '123', vencimento: input, valor: '100.00' };
         expect(() => ReceivableMapper.normalize(payload)).toThrow(ContractMappingError);
       }
+    });
+  });
+
+  describe('DateParser', () => {
+    it('parses YYYY-MM-DD correctly', () => {
+      expect(DateParser.parse('2026-09-15', 'YYYY-MM-DD', 'TEST')).toBe('2026-09-15');
+    });
+
+    it('parses MM/DD/YYYY correctly', () => {
+      expect(DateParser.parse('09/15/2026', 'MM/DD/YYYY', 'TEST')).toBe('2026-09-15');
+    });
+
+    it('throws on invalid rollover date', () => {
+      expect(() => DateParser.parse('2026-02-31', 'YYYY-MM-DD', 'TEST')).toThrow(ContractMappingError);
+      expect(() => DateParser.parse('02/31/2026', 'MM/DD/YYYY', 'TEST')).toThrow(ContractMappingError);
+    });
+
+    it('returns null on empty input', () => {
+      expect(DateParser.parse('', 'YYYY-MM-DD', 'TEST')).toBeNull();
+      expect(DateParser.parse(undefined, 'MM/DD/YYYY', 'TEST')).toBeNull();
     });
   });
 });
