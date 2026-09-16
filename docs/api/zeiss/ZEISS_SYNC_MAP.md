@@ -29,8 +29,8 @@ Operações executadas pelo `sync_worker`, mas engatilhadas de maneira seletiva 
 
 | API | DOMAIN | OPERATION | PERSISTÊNCIA | OBJETIVO E REGRAS |
 |---|---|---|---|---|
-| **ORD-002** | orders | `detail` | REQUIRED | ORD-002 é executada seletivamente para pedidos identificados por ORD-001 que necessitem hidratação ou atualização de detalhe segundo critérios que serão definidos no desenho do engine. Pré-requisito: Identificador contratual do pedido gerado por fluxos anteriores. |
-| **TRK-001** | tracking | `sync` | REQUIRED | TRK-001 pode ser executada quando o pedido possuir os identificadores contratuais necessários para tracking, incluindo NF quando exigida pelo provider. Condição de parada permanece atrelada aos status terminais da logística ZEISS. *(Nota: O provider de TRK-001 foi formalmente confirmado e implementado; no entanto, o smoke real encontrou-se momentaneamente BLOCKED pela ausência puramente orgânica de um pedido faturado com NF válida durante a validação. A API e a estrutura se mantêm plenamente validadas)*. |
+| **ORD-002** | orders | `detail` | REQUIRED | ORD-002 é a fonte autoritativa de detalhe operacional. Refresca pedidos mutáveis e desconhecidos descobertos por ORD-001. A atualização recorrente de detalhe é interrompida quando o pedido atinge "Faturado - Aguardando processo logístico". Autoridade primária sobre expected_date atual, podendo substituir previsões antigas (mas nunca apagando com nulo, e nunca sobrescrevendo entry_date). |
+| **TRK-001** | tracking | `sync` | REQUIRED | TRK-001 torna-se elegível a partir do estado de logística ("Faturado - Aguardando processo logístico") + NF presente (proveniente de ORD-002). O estado defasado de ORD-001 não deve bloquear o tracking. Condição de parada permanece atrelada aos status terminais da logística ZEISS. |
 
 ---
 
@@ -75,4 +75,3 @@ Decisões de negócios que não possuem resposta canônica da ZEISS neste instan
 
 - **TRACKING_TERMINAL_STATUS = UNRESOLVED** (Quais IDs operacionais representam de fato a finalização lógica de um envio na DRIVIN da ZEISS?).
 - **CAMPAIGN_INACTIVE_BEHAVIOR = UNRESOLVED** (Quando uma campanha encerra ou é inativada, a ZEISS a omite da matriz `ativas` de CAM-001 ou altera flags no próprio payload?).
-- **ORD_DETAIL_REFRESH_RULE = UNRESOLVED** (Exatamente quais condições acionam a re-hidratação de um pedido por ORD-002?).

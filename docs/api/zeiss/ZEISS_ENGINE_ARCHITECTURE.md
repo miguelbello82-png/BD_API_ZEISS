@@ -89,7 +89,7 @@ Os classificadores são abstrações que convertem status brutos da ZEISS em con
 - `ITrackingClassifier`: classifica `ACTIVE`, `TERMINAL` ou `NOT_CONFIGURED`.
 
 **Implementações padrão (Unresolved):**
-- `UnresolvedOrderClassifier`: tudo é MUTABLE (conservador).
+- `OrderClassifier`: implementado baseando-se no codsit 6.1 (BILLED_LOGISTICS_READY).
 - `UnresolvedTrackingClassifier`: nada é terminal (conservador).
 
 Nenhum status ZEISS está hardcoded. Os classificadores concretos serão configurados quando houver evidência canônica.
@@ -159,6 +159,5 @@ Release condicionado: `WHERE owner_token = ?`
 
 ## 8. UNRESOLVED
 
-- **ORDERS_BILLED_STATUS_MAPPING = UNRESOLVED**
 - **TRACKING_TERMINAL_STATUS = UNRESOLVED**
 - **CAMPAIGN_INACTIVE_BEHAVIOR = UNRESOLVED**

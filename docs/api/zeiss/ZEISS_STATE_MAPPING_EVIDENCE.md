@@ -119,4 +119,7 @@ Baseado estritamente nas evidências documentais:
 - Importante: 404 do TRK-001 NÃO significa automaticamente "transportadora ainda não registrou". A interpretação exata permanece não comprovada no contrato.
 
 ### ORDERS DATE SEMANTICS
-- **ORDERS_DATE_BOUNDARY_SEMANTICS = UNRESOLVED**
+- **ORDERS_DATE_BOUNDARY_SEMANTICS = RESOLVED**
+- **entry_date**: Data de entrada/criação do pedido. Valor imutável. Pode ser populado por ORD-001 (`data-entrada`) ou ORD-002 (`entrada.data`), mas um valor existente nunca deve ser sobrescrito por fluxos de sync (inclusive se houver divergência).
+- **expected_date**: Data atual de previsão de entrega. Valor operacional e mutável. ORD-002 (`previsao`) é a fonte de verdade absoluta e pode sobrescrever valores antigos, mas sem apagar (nullify) se vier vazio. ORD-001 (`previsao-entrega`) atua apenas como fallback para descoberta inicial, populando apenas se `expected_date` for nulo, e nunca sobrescrevendo valores existentes.
+- **primprevisao**: Previsão original/primeira projeção. Não é mapeado para `expected_date`. Mantido como gap de schema/futuro candidato de campo histórico não persistido na tabela atual.

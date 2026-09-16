@@ -20,7 +20,7 @@ export class PgOrderDetailsRepository implements IOrderDetailsRepository {
         const updateDatesQuery = `
           UPDATE zeiss.orders
           SET
-            entry_date = COALESCE($1, entry_date),
+            entry_date = COALESCE(entry_date, $1),
             expected_date = COALESCE($2, expected_date)
           WHERE id = $3
         `;

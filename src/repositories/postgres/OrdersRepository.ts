@@ -19,8 +19,8 @@ export class PgOrdersRepository implements IOrdersRepository {
             os_number = EXCLUDED.os_number,
             status = EXCLUDED.status,
             codsit = EXCLUDED.codsit,
-            entry_date = COALESCE(EXCLUDED.entry_date, zeiss.orders.entry_date),
-            expected_date = COALESCE(EXCLUDED.expected_date, zeiss.orders.expected_date),
+            entry_date = COALESCE(zeiss.orders.entry_date, EXCLUDED.entry_date),
+            expected_date = COALESCE(zeiss.orders.expected_date, EXCLUDED.expected_date),
             updated_at = CURRENT_TIMESTAMP
         `;
         await client.query(query, [

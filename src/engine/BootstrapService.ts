@@ -384,7 +384,6 @@ export class BootstrapService {
       throw new Error('startDate must be before or equal to endDate');
     }
 
-    // ORDERS_DATE_BOUNDARY_SEMANTICS = UNRESOLVED
     // Generating slices avoiding overlapping days.
     const totalMs = end.getTime() - start.getTime();
     const totalDays = Math.floor(totalMs / (1000 * 60 * 60 * 24)) + 1;

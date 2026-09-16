@@ -61,7 +61,7 @@ O atributo `lookback_seconds` reflete a janela histórica requerida pelo contrat
 
 ### A. ORD-002 (Detail)
 - **Estratégia Conservadora (Primeira Hidratação):** O worker buscará no banco local por IDs listados em `zeiss.orders` que ainda não possuam chave correspondente em `zeiss.order_details`.
-- **Estratégia de Atualização:** Mantém-se *UNRESOLVED* (como classificar a re-hidratação). Logo, a iteração de discovery buscará puramente furos (dados ausentes), sem inventar status que requeiram refresh constante neste gate.
+- **Estratégia de Atualização:** Pedidos classificados como `MUTABLE` são re-hidratados. A atualização recorrente cessa quando atingem o estado `BILLED_LOGISTICS_READY` ("Faturado - Aguardando processo logístico").
 
 ### B. TRK-001 (Tracking)
 - **Descoberta:** O worker procura pedidos que já possuem a chave logística mínima revelada (`numnf` não nulo).
@@ -93,4 +93,3 @@ graph TD
 
 - **TRACKING_TERMINAL_STATUS = UNRESOLVED** (Falta confirmar a relação de códigos de finalização na DRIVIN para cessar as requisições ativas de TRK-001 no banco local).
 - **CAMPAIGN_INACTIVE_BEHAVIOR = UNRESOLVED** (Campanhas antigas continuarão chegando pelo payload geral CAM-001 ou desaparecerão? Em qual momento exclui-se um lead inútil da memória local?).
-- **ORD_DETAIL_REFRESH_RULE = UNRESOLVED** (Fora a primeira hidratação, que evento exatamente deve acionar uma reconsulta obrigatória de ORD-002 sobre um pedido? Alteração de preço? Status rebaixado? Recálculo de grade?).
