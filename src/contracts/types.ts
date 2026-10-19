@@ -97,11 +97,10 @@ export interface CampaignRecord {
 }
 
 export interface LeadRecord {
-  lead_id: string;
   campaign_id: string;
-  cpf_hmac: string | null;
+  email_hmac: string;
+  voucher_code: string;
   status: string | null;
-  voucher_code: string | null;
 }
 
 export interface ReceivableRecord {

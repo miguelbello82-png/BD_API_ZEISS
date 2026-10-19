@@ -33,3 +33,6 @@ docs/api/zeiss/Catalogo/*.pdf
 
 # Local account identifiers in API reference
 docs/api/zeiss/API_ZEISS.sanitized.postman_collection.json
+
+.temp/
+**/.temp/

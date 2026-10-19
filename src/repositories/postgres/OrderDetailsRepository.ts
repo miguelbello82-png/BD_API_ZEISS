@@ -3,17 +3,25 @@ import { IOrderDetailsRepository } from '../../contracts/repositories';
 import { OrderDetailRecord } from '../../contracts/types';
 
 export class PgOrderDetailsRepository implements IOrderDetailsRepository {
-  constructor(private db: IDatabaseExecutor) {}
+  constructor(
+    private db: IDatabaseExecutor,
+    private storeId?: string
+  ) {}
 
-  async upsert(orderNumber: string, detail: OrderDetailRecord): Promise<void> {
+  getStoreId(): string | undefined {
+    return this.storeId;
+  }
+
+  async upsert(orderNumber: string, detail: OrderDetailRecord, storeIdOverride?: string): Promise<void> {
     await this.db.transaction(async (client) => {
       // Find order_id
       const orderQuery = `SELECT id FROM zeiss.orders WHERE order_number = $1`;
-      const orders = await client.query(orderQuery, [orderNumber]);
+      const orders = await client.query<{ id: string }>(orderQuery, [orderNumber]);
       if (orders.length === 0) {
         throw new Error(`Order ${orderNumber} not found when upserting detail`);
       }
       const orderId = orders[0].id;
+      const targetStoreId = storeIdOverride !== undefined ? storeIdOverride : (this.storeId || null);
 
       // Update parent order dates (using COALESCE so we never erase an existing date)
       if (detail.entry_date || detail.expected_date) {
@@ -27,41 +35,73 @@ export class PgOrderDetailsRepository implements IOrderDetailsRepository {
         await client.query(updateDatesQuery, [detail.entry_date || null, detail.expected_date || null, orderId]);
       }
 
-      // Upsert detail (using order_id as foreign key constraint, assuming unique on order_id)
-      const detailQuery = `
-        INSERT INTO zeiss.order_details (order_id, raw_status, raw_situacao, updated_at)
-        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-        ON CONFLICT (order_id)
-        DO UPDATE SET
-          raw_status = EXCLUDED.raw_status,
-          raw_situacao = EXCLUDED.raw_situacao,
-          updated_at = CURRENT_TIMESTAMP
-      `;
-      await client.query(detailQuery, [orderId, detail.status, detail.situacao]);
+      // Upsert detail
+      if (targetStoreId) {
+        const detailQuery = `
+          INSERT INTO zeiss.order_details (order_id, store_id, raw_status, raw_situacao, updated_at)
+          VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+          ON CONFLICT (order_id)
+          DO UPDATE SET
+            raw_status = EXCLUDED.raw_status,
+            raw_situacao = EXCLUDED.raw_situacao,
+            store_id = COALESCE(zeiss.order_details.store_id, EXCLUDED.store_id),
+            updated_at = CURRENT_TIMESTAMP
+        `;
+        await client.query(detailQuery, [orderId, targetStoreId, detail.status, detail.situacao]);
 
-      // Upsert invoices
-      if (detail.invoices && detail.invoices.length > 0) {
-        for (const invoice of detail.invoices) {
-          const invoiceQuery = `
-            INSERT INTO zeiss.fiscal_documents (order_id, nf_number, nf_series, created_at)
-            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-            ON CONFLICT (order_id, nf_number)
-            DO UPDATE SET nf_series = EXCLUDED.nf_series
-          `;
-          await client.query(invoiceQuery, [orderId, invoice.number, invoice.series]);
+        // Upsert invoices
+        if (detail.invoices && detail.invoices.length > 0) {
+          for (const invoice of detail.invoices) {
+            const invoiceQuery = `
+              INSERT INTO zeiss.fiscal_documents (order_id, store_id, nf_number, nf_series, created_at)
+              VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+              ON CONFLICT (order_id, nf_number)
+              DO UPDATE SET
+                nf_series = EXCLUDED.nf_series,
+                store_id = COALESCE(zeiss.fiscal_documents.store_id, EXCLUDED.store_id)
+            `;
+            await client.query(invoiceQuery, [orderId, targetStoreId, invoice.number, invoice.series]);
+          }
+        }
+      } else {
+        const detailQuery = `
+          INSERT INTO zeiss.order_details (order_id, raw_status, raw_situacao, updated_at)
+          VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+          ON CONFLICT (order_id)
+          DO UPDATE SET
+            raw_status = EXCLUDED.raw_status,
+            raw_situacao = EXCLUDED.raw_situacao,
+            updated_at = CURRENT_TIMESTAMP
+        `;
+        await client.query(detailQuery, [orderId, detail.status, detail.situacao]);
+
+        // Upsert invoices
+        if (detail.invoices && detail.invoices.length > 0) {
+          for (const invoice of detail.invoices) {
+            const invoiceQuery = `
+              INSERT INTO zeiss.fiscal_documents (order_id, nf_number, nf_series, created_at)
+              VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+              ON CONFLICT (order_id, nf_number)
+              DO UPDATE SET nf_series = EXCLUDED.nf_series
+            `;
+            await client.query(invoiceQuery, [orderId, invoice.number, invoice.series]);
+          }
         }
       }
     });
   }
 
-  async exists(orderNumber: string): Promise<boolean> {
+  async exists(orderNumber: string, storeIdOverride?: string): Promise<boolean> {
+    const targetStoreId = storeIdOverride !== undefined ? storeIdOverride : this.storeId;
     const query = `
       SELECT 1
       FROM zeiss.order_details od
       JOIN zeiss.orders o ON o.id = od.order_id
       WHERE o.order_number = $1
+      ${targetStoreId ? 'AND o.store_id = $2' : ''}
     `;
-    const result = await this.db.query(query, [orderNumber]);
+    const params = targetStoreId ? [orderNumber, targetStoreId] : [orderNumber];
+    const result = await this.db.query(query, params);
     return result.length > 0;
   }
 }

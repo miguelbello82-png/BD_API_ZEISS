@@ -1,17 +1,32 @@
 import { ZeissApiClient } from '../config/client';
 import { zeissConfig } from '../config/config';
+import { StoreZeissContext } from '../contracts/store';
 
 export class OrdersProvider {
   private client: ZeissApiClient;
 
-  constructor() {
-    this.client = new ZeissApiClient();
+  constructor(
+    private storeContext?: StoreZeissContext,
+    client?: ZeissApiClient
+  ) {
+    this.client = client || new ZeissApiClient();
   }
 
   // ORD-001
-  async getOrders(startDate: string, endDate: string, status: string, abortSignal?: AbortSignal) {
-    const path = `/prd/pedidos/data/${zeissConfig.cnpj}/${zeissConfig.countryId}/${startDate}/${endDate}/${status}`;
-    const res = await this.client.fetch<Record<string, unknown>>(zeissConfig.ordersBaseUrl, path, { signal: abortSignal });
+  async getOrders(
+    startDate: string,
+    endDate: string,
+    status: string,
+    abortSignal?: AbortSignal,
+    contextOverride?: Partial<StoreZeissContext>
+  ) {
+    const cnpj = contextOverride?.cnpj || this.storeContext?.cnpj || zeissConfig.cnpj;
+    const countryId = contextOverride?.countryId || this.storeContext?.countryId || zeissConfig.countryId;
+    const baseUrl = contextOverride?.ordersBaseUrl || this.storeContext?.ordersBaseUrl || zeissConfig.ordersBaseUrl;
+    const apiKey = contextOverride?.apiKey || this.storeContext?.apiKey;
+
+    const path = `/prd/pedidos/data/${cnpj}/${countryId}/${startDate}/${endDate}/${status}`;
+    const res = await this.client.fetch<Record<string, unknown>>(baseUrl, path, { signal: abortSignal, apiKey });
     if (!res || !Array.isArray(res.pedidos)) {
       throw new Error('ZEISS API Contract Error: Expected { pedidos: [] }');
     }
@@ -19,22 +34,41 @@ export class OrdersProvider {
   }
 
   // ORD-002
-  async getOrderDetail(orderNumber: string, abortSignal?: AbortSignal) {
+  async getOrderDetail(
+    orderNumber: string,
+    abortSignal?: AbortSignal,
+    contextOverride?: Partial<StoreZeissContext>
+  ) {
+    const countryId = contextOverride?.countryId || this.storeContext?.countryId || zeissConfig.countryId;
+    const saowebCode = contextOverride?.saowebCode || this.storeContext?.saowebCode || zeissConfig.saowebCode;
+    const baseUrl = contextOverride?.ordersBaseUrl || this.storeContext?.ordersBaseUrl || zeissConfig.ordersBaseUrl;
+    const apiKey = contextOverride?.apiKey || this.storeContext?.apiKey;
+
     const path = `/prd/pedidos/detalhe`;
-    return await this.client.fetch<Record<string, unknown>>(zeissConfig.ordersBaseUrl, path, {
+    return await this.client.fetch<Record<string, unknown>>(baseUrl, path, {
       method: 'POST',
       body: JSON.stringify({
-        idpais: zeissConfig.countryId,
+        idpais: countryId,
         numpedido: orderNumber,
-        codcli: zeissConfig.saowebCode
+        codcli: saowebCode
       }),
-      signal: abortSignal
+      signal: abortSignal,
+      apiKey
     });
   }
 
   // TRK-001
-  async getTracking(numnf: string, abortSignal?: AbortSignal) {
-    const path = `/prd/pedidos/tracking/drivin/${zeissConfig.countryId}/${zeissConfig.saowebCode}/${numnf}`;
-    return await this.client.fetch<Record<string, unknown>[]>(zeissConfig.trackingBaseUrl, path, { signal: abortSignal });
+  async getTracking(
+    numnf: string,
+    abortSignal?: AbortSignal,
+    contextOverride?: Partial<StoreZeissContext>
+  ) {
+    const countryId = contextOverride?.countryId || this.storeContext?.countryId || zeissConfig.countryId;
+    const saowebCode = contextOverride?.saowebCode || this.storeContext?.saowebCode || zeissConfig.saowebCode;
+    const baseUrl = contextOverride?.trackingBaseUrl || this.storeContext?.trackingBaseUrl || zeissConfig.trackingBaseUrl;
+    const apiKey = contextOverride?.apiKey || this.storeContext?.apiKey;
+
+    const path = `/prd/pedidos/tracking/drivin/${countryId}/${saowebCode}/${numnf}`;
+    return await this.client.fetch<Record<string, unknown>[]>(baseUrl, path, { signal: abortSignal, apiKey });
   }
 }

@@ -66,5 +66,10 @@ export const zeissConfig = {
     const id = process.env.ZEISS_FIN_USER_ID;
     if (!id && process.env.NODE_ENV !== 'test') throw new Error('ZEISS configuration missing: ZEISS_FIN_USER_ID');
     return id || '';
+  },
+  get leadsHmacSecret(): string {
+    const secret = process.env.ZEISS_LEADS_HMAC_SECRET;
+    if (!secret && process.env.NODE_ENV !== 'test') throw new Error('ZEISS configuration missing: ZEISS_LEADS_HMAC_SECRET');
+    return secret || '';
   }
 };

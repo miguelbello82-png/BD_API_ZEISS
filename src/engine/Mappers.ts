@@ -202,28 +202,49 @@ export class CampaignMapper {
   }
 }
 
+import { normalizeLeadEmail, computeLeadEmailHmac } from '../utils/hmac';
+
 // ============================================================
 // DATA MINIMIZATION: LEAD-001 / LEAD-002 (Leads)
 // ============================================================
 
 export class LeadMapper {
-  static normalize(raw: unknown): LeadRecord {
+  static normalize(raw: unknown, campaignId: string, hmacSecret: string): LeadRecord {
     if (!raw || typeof raw !== 'object') {
       throw new ContractMappingError('Invalid lead payload: expected object');
     }
 
-    const rawObj = raw as Record<string, unknown>;
-
-    if (typeof rawObj.id_lead !== 'string' && typeof rawObj.id_lead !== 'number') {
-      throw new ContractMappingError('Lead missing required id_lead identifier');
+    if (!campaignId || typeof campaignId !== 'string') {
+      throw new ContractMappingError('Campaign context is required for lead mapping');
     }
 
+    if (!hmacSecret || typeof hmacSecret !== 'string') {
+      throw new ContractMappingError('HMAC secret is required for lead mapping');
+    }
+
+    const rawObj = raw as Record<string, unknown>;
+
+    const voucherCode = typeof rawObj.voucher === 'string' ? rawObj.voucher.trim() :
+                        (typeof rawObj.vouchercode === 'string' ? rawObj.vouchercode.trim() : null);
+
+    if (!voucherCode) {
+      throw new ContractMappingError('Lead missing required voucher_code identifier');
+    }
+
+    const rawEmail = typeof rawObj.email === 'string' ? rawObj.email : null;
+    const normalizedEmail = normalizeLeadEmail(rawEmail);
+
+    if (!normalizedEmail) {
+      throw new ContractMappingError('Lead missing required email for HMAC derivation');
+    }
+
+    const emailHmac = computeLeadEmailHmac(normalizedEmail, hmacSecret);
+
     return {
-      lead_id: String(rawObj.id_lead),
-      campaign_id: typeof rawObj.id_campanha === 'string' || typeof rawObj.id_campanha === 'number' ? String(rawObj.id_campanha) : '',
-      cpf_hmac: null, // As per C2.8-R3, do not read cpf_hmac from ZEISS raw payload
+      campaign_id: campaignId,
+      email_hmac: emailHmac,
+      voucher_code: voucherCode,
       status: typeof rawObj.status === 'string' ? rawObj.status : null,
-      voucher_code: typeof rawObj.voucher === 'string' ? rawObj.voucher : null,
     };
   }
 }

@@ -1,0 +1,736 @@
+openapi: 3.1.0
+info:
+  title: BD_API_ZEISS Serving API
+  version: 1.0.0
+  description: |
+    API canônica oficial da plataforma independente BD_API_ZEISS.
+    Permite consumo externo seguro, autenticado e auditado de dados sincronizados da ZEISS.
+    
+    ### Classificação de Status dos Endpoints
+    - `[STATUS: OPERACIONAL]`: Implementado, validado com testes automatizados e apto para tráfego homologado.
+    - `[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]`: Código e rotas implementados; pendente homologação de credenciais/massa comercial real.
+    - `[STATUS: PLANEJADO]`: Contrato desenhado no roadmap da plataforma; implementação em fase posterior.
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Servidor Local de Desenvolvimento e Testes
+  - url: https://api.zeiss-platform.internal/api/v1
+    description: Gateway Interno de Produção (Planejado)
+paths:
+  /health:
+    get:
+      summary: Health Check do Serviço
+      description: Retorna a integridade do runtime da Serving API. Acesso público sem autenticação.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Infraestrutura
+      responses:
+        "200":
+          description: Serviço operacional
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /stores/{store_id}/orders:
+    get:
+      summary: Listar Pedidos da Loja
+      description: |
+        Retorna lista paginada de pedidos pertencentes estritamente à loja informada.
+        Isolamento absoluto: registros históricos não atribuídos (`store_id IS NULL`) ou de outras lojas nunca são retornados.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Pedidos
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          description: UUID interno da loja
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: start_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Lista de pedidos da loja
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersListResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+
+  /stores/{store_id}/orders/{order_number}:
+    get:
+      summary: Detalhes do Pedido da Loja
+      description: Retorna os dados operacionais consolidados e detalhamento fiscal do pedido para a loja.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Pedidos
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: order_number
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detalhes do pedido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderDetailResponse'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+
+  /stores/{store_id}/tracking/{nf_number}:
+    get:
+      summary: Rastreamento Logístico por NF
+      description: Retorna o histórico de eventos de rastreamento DRIVIN da nota fiscal para a loja solicitada.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Rastreamento
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: nf_number
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Eventos de rastreamento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrackingResponse'
+
+  /stores/{store_id}/campaigns:
+    get:
+      summary: Listar Campanhas Vigentes
+      description: Retorna as campanhas ativas e elegíveis para a unidade.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Campanhas
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Lista de campanhas ativas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignsResponse'
+
+  /stores/{store_id}/campaigns/{campaign_id}/leads:
+    get:
+      summary: Listar Leads da Campanha na Loja
+      description: Retorna leads associados à campanha e loja solicitadas. Hashes HMAC preservados.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Campanhas
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: campaign_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Lista de leads da campanha
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadsResponse'
+
+  /stores/{store_id}/vouchers/activate:
+    post:
+      summary: Ativação/Resgate de Voucher (Mutativo)
+      description: |
+        Executa a mutação VCH-003 na API ZEISS com chave de idempotência obrigatória.
+        Em caso de reenvio com mesma chave e payload, o resultado anterior é reproduzido sem disparar nova mutação.
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Vouchers
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Chave única de idempotência gerada pelo cliente consumidor
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoucherActivationRequest'
+      responses:
+        "200":
+          description: Voucher ativado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoucherActivationResponse'
+        "400":
+          description: Requisição inválida ou ausência do header Idempotency-Key
+        "409":
+          description: Conflito de idempotência (payload divergente ou processamento em andamento)
+
+  /stores/{store_id}/vouchers/generate:
+    post:
+      summary: Geração de Vouchers ZEISS (Mutativo)
+      description: Emissão de novo voucher através de VCH-002.
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Vouchers
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Voucher gerado com sucesso
+
+  /stores/{store_id}/vouchers/{voucher_code}:
+    get:
+      summary: Consulta On-Demand de Voucher
+      description: Recupera detalhes do voucher em tempo real via VCH-001.
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Vouchers
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: voucher_code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detalhes do voucher
+
+  /stores/{store_id}/financial/boletos/{boleto_id}:
+    get:
+      summary: Recuperação Transitória de Boleto (FIN-002)
+      description: Consulta transitória de segunda via de boleto na ZEISS em tempo de atendimento.
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Financeiro
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: boleto_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dados para visualização do boleto
+
+  /stores/{store_id}/financial/danfe/{nf_key}:
+    get:
+      summary: Recuperação Transitória de DANFE/XML (FIN-003)
+      description: Consulta transitória de documento fiscal na ZEISS.
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Financeiro
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: nf_key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dados ou link do documento fiscal
+
+  /admin/unassigned-orders:
+    get:
+      summary: Listar Pedidos Históricos Não Atribuídos (Administrativo)
+      description: |
+        Endpoint segregado exclusivo para administradores de conciliação.
+        Exige o escopo 'admin:historical:read'.
+        Retorna exclusivamente pedidos onde `store_id IS NULL` (base histórica pré-multi-loja).
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Administração
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Pedidos históricos não atribuídos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnassignedOrdersResponse'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+
+  /admin/stores/onboard:
+    post:
+      summary: Cadastro de Nova Loja (Zero-Deploy)
+      description: Criação administrativa de organização, loja e identidade ZEISS sem necessidade de deploy.
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Administração
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StoreRegistrationRequest'
+      responses:
+        "201":
+          description: Loja cadastrada em status 'draft' ou 'ready'
+
+  /admin/stores/{store_id}/bootstrap:
+    post:
+      summary: Disparo de Bootstrap Histórico de Loja
+      description: Dispara importação histórica de pedidos, tracking, financeiro e campanhas para uma nova loja.
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Administração
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "202":
+          description: Bootstrap iniciado ou retomado com sucesso
+
+  /stores/{store_id}/vouchers/2fa/confirm:
+    post:
+      summary: Confirmação de PIN/Token 2FA para Voucher
+      description: Validação de segundo fator de autenticação para resgate de vouchers restritos.
+      tags:
+        - "[STATUS: PLANEJADO]"
+        - Vouchers 2FA
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "501":
+          description: Funcionalidade planejada no roadmap
+
+  /stores/{store_id}/vouchers/2fa/resend:
+    post:
+      summary: Reenvio de E-mail de Validação 2FA
+      description: Solicitação de novo código 2FA ao consumidor final.
+      tags:
+        - "[STATUS: PLANEJADO]"
+        - Vouchers 2FA
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "501":
+          description: Funcionalidade planejada no roadmap
+
+  /stores/{store_id}/sales/assisted:
+    post:
+      summary: Registro de Venda Assistida ZEISS
+      description: Integração de fluxos assistidos de vendas no ecossistema ZEISS.
+      tags:
+        - "[STATUS: PLANEJADO]"
+        - Vendas
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "501":
+          description: Funcionalidade planejada no roadmap
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Token secreto de consumidor gerado pela plataforma
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Token Bearer equivalente ao X-API-Key
+
+  responses:
+    UnauthorizedError:
+      description: Não autorizado — Token ausente, inválido, expirado ou revogado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/StandardError'
+    ForbiddenError:
+      description: Acesso negado — Escopo insuficiente ou tentativa de acesso cruzado entre lojas
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/StandardError'
+    NotFoundError:
+      description: Recurso não localizado para os identificadores fornecidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/StandardError'
+
+  schemas:
+    StandardError:
+      type: object
+      required:
+        - success
+        - error
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              example: "STORE_ACCESS_DENIED"
+            message:
+              type: string
+              example: "Consumer is forbidden from accessing store 'store-uuid-2'"
+            details:
+              type: object
+
+    HealthResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              example: "ok"
+            timestamp:
+              type: string
+              format: date-time
+
+    OrdersListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            orders:
+              type: array
+              items:
+                $ref: '#/components/schemas/OrderSummary'
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    OrderDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/OrderDetail'
+
+    OrderSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        order_number:
+          type: string
+        os_number:
+          type: string
+        status:
+          type: string
+        codsit:
+          type: string
+        entry_date:
+          type: string
+          format: date
+        expected_date:
+          type: string
+          format: date
+
+    OrderDetail:
+      allOf:
+        - $ref: '#/components/schemas/OrderSummary'
+        - type: object
+          properties:
+            detail_situacao:
+              type: string
+            detail_invoices:
+              type: array
+              items:
+                type: object
+
+    TrackingResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            order_number:
+              type: string
+            nf_number:
+              type: string
+            events:
+              type: array
+              items:
+                type: object
+
+    CampaignsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            campaigns:
+              type: array
+              items:
+                type: object
+
+    LeadsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            leads:
+              type: array
+              items:
+                type: object
+
+    VoucherActivationRequest:
+      type: object
+      required:
+        - campaignId
+        - voucherCode
+      properties:
+        campaignId:
+          type: string
+        voucherCode:
+          type: string
+        pin:
+          type: string
+
+    VoucherActivationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            voucherCode:
+              type: string
+            activated:
+              type: boolean
+            _replayed:
+              type: boolean
+
+    StoreRegistrationRequest:
+      type: object
+      required:
+        - organizationId
+        - storeCode
+        - storeName
+        - cnpj
+        - credentialId
+        - countryId
+        - saowebCode
+        - zeissStoreCode
+        - voucherUserId
+        - finUserId
+      properties:
+        organizationId:
+          type: string
+          format: uuid
+        storeCode:
+          type: string
+        storeName:
+          type: string
+        cnpj:
+          type: string
+        credentialId:
+          type: string
+          format: uuid
+        countryId:
+          type: string
+        saowebCode:
+          type: string
+        zeissStoreCode:
+          type: string
+        voucherUserId:
+          type: string
+        finUserId:
+          type: string
+        leadsHmacSecretRef:
+          type: string
+
+    UnassignedOrdersResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+            orders:
+              type: array
+              items:
+                $ref: '#/components/schemas/OrderSummary'
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        totalPages:
+          type: integer

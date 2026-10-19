@@ -32,6 +32,7 @@ import { IOrderClassifier, ITrackingClassifier } from './Classifiers';
 import { ILogger } from '../observability/Logger';
 import { OrderDetailMapper, TrackingMapper, LeadMapper, ProductMapper, CampaignMapper } from './Mappers';
 import { OrderStateInput } from '../contracts/types';
+import { zeissConfig } from '../config/config';
 
 export interface RefreshDeps {
   detailProvider: IOrderDetailProvider;
@@ -75,7 +76,7 @@ export class RefreshService {
 
     try {
       const leads = await this.deps.leadsProvider.getLeads(campaignId);
-      const normalizedLeads = leads.map(l => LeadMapper.normalize(l));
+      const normalizedLeads = leads.map(l => LeadMapper.normalize(l, campaignId, zeissConfig.leadsHmacSecret));
       await this.deps.leadsRepo.upsertMany(campaignId, normalizedLeads);
       result.itemsProcessed += normalizedLeads.length;
     } catch (err) {
@@ -86,7 +87,7 @@ export class RefreshService {
 
     try {
       const redeemed = await this.deps.leadsProvider.getRedeemedLeads(campaignId);
-      const normalizedRedeemed = redeemed.map(l => LeadMapper.normalize(l));
+      const normalizedRedeemed = redeemed.map(l => LeadMapper.normalize(l, campaignId, zeissConfig.leadsHmacSecret));
       await this.deps.leadsRepo.upsertRedeemedMany(campaignId, normalizedRedeemed);
       result.itemsProcessed += normalizedRedeemed.length;
     } catch (err) {

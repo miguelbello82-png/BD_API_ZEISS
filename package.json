@@ -8,10 +8,13 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "jest",
+    "test": "jest tests/unit",
+    "test:integration": "jest tests/integration",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "worker": "node dist/worker.js",
+    "api": "node dist/api/server.js",
+    "job:run": "node dist/cli/run-job.js",
     "backfill:orders": "node dist/cli/backfill-orders.js",
     "backfill:receivables": "node dist/cli/backfill-receivables.js",
     "backfill:tracking": "node dist/cli/backfill-tracking.js"

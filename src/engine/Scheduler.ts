@@ -11,6 +11,19 @@ import { ILogger } from '../observability/Logger';
 import { randomUUID } from 'crypto';
 import { IClock, ISleeper } from '../utils/Clock';
 
+export type SyncExecutionResult =
+  | 'EXECUTED_SUCCESS'
+  | 'EXECUTED_FAILED'
+  | 'SKIPPED_LEASE'
+  | 'SKIPPED_DISABLED'
+  | 'CONFIGURATION_ERROR'
+  | 'SKIPPED_NOT_DUE';
+
+export interface ExecutePolicyOptions {
+  allowDisabled?: boolean;
+  force?: boolean;
+}
+
 export interface SchedulerDeps {
   policyRepo: ISyncPolicyRepository;
   stateRepo: ISyncStateRepository;
@@ -33,11 +46,37 @@ export class Scheduler {
       : await this.deps.policyRepo.findAllEnabled(); // Must not default to zeiss! Add findAllEnabled to repo
 
     for (const policy of policies) {
-      await this.evaluatePolicy(policy);
+      await this.executePolicy(policy, { force: false, allowDisabled: false });
     }
   }
 
-  private async evaluatePolicy(policy: SyncPolicy): Promise<void> {
+  async executeOperation(
+    provider: string,
+    domain: string,
+    operation: string,
+    options?: ExecutePolicyOptions
+  ): Promise<SyncExecutionResult> {
+    const job = this.deps.jobRegistry.get(provider, domain, operation);
+    if (!job) {
+      this.deps.logger.error('Scheduler', 'Job not found in registry', { provider, domain, operation });
+      return 'CONFIGURATION_ERROR';
+    }
+
+    const policy = await this.deps.policyRepo.findByKey(provider, domain, operation);
+    if (!policy) {
+      this.deps.logger.error('Scheduler', 'Policy not found for operation', { provider, domain, operation });
+      return 'CONFIGURATION_ERROR';
+    }
+
+    const result = await this.executePolicy(policy, {
+      ...options,
+      force: options?.force ?? true
+    });
+
+    return result ?? 'CONFIGURATION_ERROR';
+  }
+
+  async executePolicy(policy: SyncPolicy, options?: ExecutePolicyOptions): Promise<SyncExecutionResult | null> {
     const { provider, domain, operation } = policy;
     const loggerCtx = { provider, domain, operation };
 
@@ -45,20 +84,27 @@ export class Scheduler {
     if (policy.interval_seconds <= 0 || policy.timeout_seconds <= 0 || policy.lease_ttl_seconds <= 0 || policy.max_retries < 0 || policy.retry_delay_seconds < 0) {
       this.deps.logger.error('Scheduler', 'Invalid policy configuration', loggerCtx);
       await this.deps.healthRepo.recordFailure(provider, domain, operation);
-      return;
+      return 'CONFIGURATION_ERROR';
     }
 
     const envelopeSeconds = ((1 + policy.max_retries) * policy.timeout_seconds) + (policy.max_retries * policy.retry_delay_seconds);
     if (policy.lease_ttl_seconds < envelopeSeconds) {
       this.deps.logger.error('Scheduler', 'Policy lease TTL is smaller than execution envelope', { ...loggerCtx, envelopeSeconds, leaseTtl: policy.lease_ttl_seconds });
       await this.deps.healthRepo.recordFailure(provider, domain, operation);
-      return;
+      return 'CONFIGURATION_ERROR';
     }
 
-    // 1. Determine if due
+    // Check if policy is disabled
+    if (!policy.enabled && !options?.allowDisabled) {
+      this.deps.logger.warn('Scheduler', 'Policy is disabled; skipping execution', loggerCtx);
+      return 'SKIPPED_DISABLED';
+    }
+
+    // 1. Determine if due (unless force is requested)
     const state = await this.deps.stateRepo.findByKey(provider, domain, operation);
-    if (!this.isDue(policy, state)) {
-      return;
+    if (!options?.force && !this.isDue(policy, state)) {
+      this.deps.logger.debug('Scheduler', 'Policy not due, skipping execution', loggerCtx);
+      return 'SKIPPED_NOT_DUE';
     }
 
     // 2. Try lease
@@ -72,7 +118,7 @@ export class Scheduler {
 
     if (!acquired) {
       this.deps.logger.debug('Scheduler', 'Lease unavailable, skipping', loggerCtx);
-      return; 
+      return 'SKIPPED_LEASE'; 
     }
 
     // 3. Keepalive setup
@@ -119,12 +165,14 @@ export class Scheduler {
       if (ownershipLost) {
         this.deps.logger.error('Scheduler', 'Job completed or failed but ownership was lost. State will not be advanced.', loggerCtx);
         await this.deps.healthRepo.recordFailure(provider, domain, operation);
+        return 'EXECUTED_FAILED';
       } else if (result.success) {
         // Explicitly prove current lease ownership again before state advancement
         const stillOwner = await this.deps.leaseRepo.renew(provider, domain, operation, this.workerId, policy.lease_ttl_seconds).catch(() => false);
         if (!stillOwner) {
           this.deps.logger.error('Scheduler', 'Lost lease ownership prior to state advancement', loggerCtx);
           await this.deps.healthRepo.recordFailure(provider, domain, operation);
+          return 'EXECUTED_FAILED';
         } else {
           await this.deps.healthRepo.recordSuccess(provider, domain, operation);
           await this.deps.stateRepo.upsert({
@@ -135,15 +183,21 @@ export class Scheduler {
             cursor_value: result.cursorValue !== undefined ? result.cursorValue : (state?.cursor_value || null)
           });
           this.deps.logger.info('Scheduler', 'Job completed successfully', { ...loggerCtx, metrics: result.metrics });
+          return 'EXECUTED_SUCCESS';
         }
       } else {
         await this.deps.healthRepo.recordFailure(provider, domain, operation);
         this.deps.logger.error('Scheduler', 'Job failed', { ...loggerCtx, error: result.error?.message });
+        return 'EXECUTED_FAILED';
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.deps.healthRepo.recordFailure(provider, domain, operation);
       this.deps.logger.error('Scheduler', 'Fatal execution error', { ...loggerCtx, error: msg });
+      if (msg.startsWith('Missing job for')) {
+        return 'CONFIGURATION_ERROR';
+      }
+      return 'EXECUTED_FAILED';
     } finally {
       keepaliveActive = false;
       // We don't await keepalivePromise here because sleeper might be blocking, it will safely exit when it wakes.

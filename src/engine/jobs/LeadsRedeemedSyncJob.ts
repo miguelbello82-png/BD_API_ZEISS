@@ -3,6 +3,7 @@ import { ILogger } from '../../observability/Logger';
 import { ILeadsProvider } from '../../contracts/providers';
 import { ISyncStateRepository, ILeadsRepository } from '../../contracts/repositories';
 import { LeadMapper } from '../Mappers';
+import { zeissConfig } from '../../config/config';
 
 export class LeadsRedeemedSyncJob implements IJob {
   private static readonly COMPONENT = 'LeadsRedeemedSyncJob';
@@ -30,7 +31,7 @@ export class LeadsRedeemedSyncJob implements IJob {
       let activeCampaigns: string[] = [];
       try {
         const cursorObj = JSON.parse(camState.cursor_value);
-        if (Array.isArray(cursorObj.activeCampaignIds)) {
+        if (Array.isArray(cursorObj.activeCampaignIds) && cursorObj.activeCampaignIds.every((id: any) => typeof id === 'string')) {
           activeCampaigns = cursorObj.activeCampaignIds;
         } else {
           throw new Error('Invalid cursor_value structure');
@@ -47,7 +48,7 @@ export class LeadsRedeemedSyncJob implements IJob {
           const rawLeads = await this.provider.getRedeemedLeads(campaignId, abortSignal);
           const normalized = rawLeads.map(raw => {
             try {
-              return LeadMapper.normalize(raw);
+              return LeadMapper.normalize(raw, campaignId, zeissConfig.leadsHmacSecret);
             } catch (err) {
               errors++;
               return null;

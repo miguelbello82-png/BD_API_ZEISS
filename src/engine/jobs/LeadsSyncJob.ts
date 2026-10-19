@@ -3,6 +3,7 @@ import { ILogger } from '../../observability/Logger';
 import { ILeadsProvider } from '../../contracts/providers';
 import { ISyncStateRepository, ILeadsRepository } from '../../contracts/repositories';
 import { LeadMapper } from '../Mappers';
+import { zeissConfig } from '../../config/config';
 
 export class LeadsSyncJob implements IJob {
   private static readonly COMPONENT = 'LeadsSyncJob';
@@ -30,7 +31,7 @@ export class LeadsSyncJob implements IJob {
       let activeCampaigns: string[] = [];
       try {
         const cursorObj = JSON.parse(camState.cursor_value);
-        if (Array.isArray(cursorObj.activeCampaignIds)) {
+        if (Array.isArray(cursorObj.activeCampaignIds) && cursorObj.activeCampaignIds.every((id: any) => typeof id === 'string')) {
           activeCampaigns = cursorObj.activeCampaignIds;
         } else {
           throw new Error('Invalid cursor_value structure');
@@ -46,7 +47,7 @@ export class LeadsSyncJob implements IJob {
           const rawLeads = await this.provider.getLeads(campaignId, abortSignal);
           const normalized = rawLeads.map(raw => {
             try {
-              return LeadMapper.normalize(raw);
+              return LeadMapper.normalize(raw, campaignId, zeissConfig.leadsHmacSecret);
             } catch (err) {
               errors++;
               return null;
@@ -55,7 +56,11 @@ export class LeadsSyncJob implements IJob {
           
           await this.leadsRepo.upsertMany(campaignId, normalized);
           synced += normalized.length;
-        } catch (err) {
+        } catch (err: any) {
+          if (err.name === 'ZeissHttpError' && err.status === 404) {
+            this.logger.info(LeadsSyncJob.COMPONENT, 'Campaign not found or without leads (404)', { campaignId });
+            continue; // Proceed to next campaign
+          }
           errors++;
           this.logger.error(LeadsSyncJob.COMPONENT, `Failed to sync leads for campaign ${campaignId}`, { error: String(err) });
         }

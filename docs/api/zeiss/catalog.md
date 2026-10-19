@@ -21,7 +21,25 @@ RESPONSE CONTRACT: PENDING FORMALIZATION
 RESPONSE CONTRACT: PENDING FORMALIZATION
 
 ## Leads
-RESPONSE CONTRACT: PENDING FORMALIZATION
+LEAD-001 documented response:
+direct array
+HTTP 404: "Campanha não encontrada ou inexistência de leads registrados na campanha" (ambíguo)
+
+LEAD-001 observed runtime response:
+{ resumo: object, dados: array }
+
+LEAD-002 observed runtime behavior:
+direct array
+
+LEAD Event Identity Model:
+Uniqueness is empirically validated against current runtime data, not contractually guaranteed by ZEISS.
+IDENTITY_MODEL = LEAD_EVENT
+Natural Event Key = campaign_id + voucher_code + email_hmac
+
+Raw PII (nome, email, telefone, cpf, etc) MUST NOT be persisted. Email is used transiently only to derive HMAC.
+
+OBSERVED_RUNTIME_BEHAVIOR
+(Note: This is runtime evidence and not an official contractual guarantee)
 
 ## Produtos
 RESPONSE CONTRACT: PENDING FORMALIZATION

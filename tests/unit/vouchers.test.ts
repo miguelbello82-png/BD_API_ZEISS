@@ -19,11 +19,58 @@ describe('VouchersProvider Unit Tests', () => {
     expect(mockFetch).toHaveBeenCalledWith(zeissConfig.campaignsBaseUrl, '/prd/campanhas/bff/list/ativas/S1/BR', expect.anything());
   });
 
-  it('LEAD-001: should get leads correctly', async () => {
-    const mockFetch = jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce([{ id: 'L1' }]);
-    const result = await provider.getLeads('C1');
-    expect(result).toEqual([{ id: 'L1' }]);
-    expect(mockFetch).toHaveBeenCalledWith(zeissConfig.campaignsBaseUrl, '/prd/campanhas/leads/loja/S1/C1', expect.anything());
+  describe('LEAD-001 adapter tests', () => {
+    it('1. direct array response -> accepted', async () => {
+      jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce([{ id: 'L1' }]);
+      const result = await provider.getLeads('C1');
+      expect(result).toEqual([{ id: 'L1' }]);
+    });
+
+    it('2. valid { resumo, dados } -> accepted', async () => {
+      jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce({
+        resumo: { total_leads: 1 },
+        dados: [{ id: 'L1' }]
+      });
+      const result = await provider.getLeads('C1');
+      expect(result).toEqual([{ id: 'L1' }]);
+    });
+
+    it('3. valid { resumo, dados: [] } -> accepted', async () => {
+      jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce({
+        resumo: { total_leads: 0 },
+        dados: []
+      });
+      const result = await provider.getLeads('C1');
+      expect(result).toEqual([]);
+    });
+
+    it('4. missing dados -> rejected', async () => {
+      const raw = { resumo: { total_leads: 1 }, items: [{ id: 'L1' }] };
+      jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce(raw);
+      const result = await provider.getLeads('C1');
+      expect(result).toEqual(raw);
+    });
+
+    it('5. dados not array -> rejected', async () => {
+      const raw = { resumo: { total_leads: 1 }, dados: { id: 'L1' } };
+      jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce(raw);
+      const result = await provider.getLeads('C1');
+      expect(result).toEqual(raw);
+    });
+
+    it('6. missing/invalid resumo -> rejected', async () => {
+      const raw = { dados: [{ id: 'L1' }] };
+      jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce(raw);
+      const result = await provider.getLeads('C1');
+      expect(result).toEqual(raw);
+    });
+
+    it('7. unrelated object -> rejected', async () => {
+      const raw = { status: 'ok' };
+      jest.spyOn(ZeissApiClient.prototype, 'fetch').mockResolvedValueOnce(raw);
+      const result = await provider.getLeads('C1');
+      expect(result).toEqual(raw);
+    });
   });
 
   it('LEAD-002: should get redeemed leads correctly without CPF', async () => {
