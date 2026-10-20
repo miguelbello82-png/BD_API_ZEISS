@@ -161,14 +161,10 @@ describe('StoreBootstrapOrchestrator (Multi-Store Historical Bootstrap & Resumab
     expect(result.domains['orders'].status).toBe('completed');
     expect(result.catchUpCompleted).toBe(true);
 
-    // Verify status was updated through the lifecycle: bootstrapping -> catching_up -> active
+    // Verify status was updated through the lifecycle: validating -> active
     expect(mockDb.query).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE core.stores SET status = $1'),
-      ['bootstrapping', storeId]
-    );
-    expect(mockDb.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE core.stores SET status = $1'),
-      ['catching_up', storeId]
+      ['validating', storeId]
     );
     expect(mockDb.query).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE core.stores SET status = $1'),
