@@ -32,6 +32,9 @@ export class AuditService {
 
     const payloadHash = crypto.createHash('sha256').update(JSON.stringify(requestPayload || {})).digest('hex');
 
+    // Normalize operation name to match DB CHECK constraint ('voucher.activate' | 'voucher.generate')
+    const normalizedOp = operationName.replace(':', '.');
+
     // Query existing operation
     const existing = await this.db.query<{
       id: string;
@@ -55,7 +58,7 @@ export class AuditService {
         );
       }
 
-      if (op.status === 'in_progress') {
+      if (op.status === 'IN_PROGRESS' || op.status === 'in_progress' || op.status === 'PENDING') {
         throw new ApiError(
           409,
           'IDEMPOTENCY_CONFLICT',
@@ -76,12 +79,12 @@ export class AuditService {
     await this.db.query(
       `INSERT INTO integration.api_operations (
          id, consumer_id, operation, store_id, idempotency_key, request_hash, status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, 'in_progress', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [operationId, consumerId, operationName, storeId, idempotencyKey, payloadHash]
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'IN_PROGRESS', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [operationId, consumerId, normalizedOp, storeId, idempotencyKey, payloadHash]
     );
 
     await this.recordEvent(operationId, 'OPERATION_STARTED', {
-      operation: operationName,
+      operation: normalizedOp,
       storeId,
       payloadHash
     });
@@ -89,7 +92,7 @@ export class AuditService {
     return {
       isDuplicate: false,
       operationId,
-      status: 'in_progress'
+      status: 'IN_PROGRESS'
     };
   }
 
@@ -98,20 +101,21 @@ export class AuditService {
    */
   async finalizeOperation(
     operationId: string,
-    status: 'completed' | 'failed',
+    status: 'completed' | 'failed' | 'SUCCEEDED' | 'FAILED_FINAL',
     responseOrError: unknown,
     errorCode?: string
   ): Promise<void> {
+    const dbStatus = (status === 'completed' || status === 'SUCCEEDED') ? 'SUCCEEDED' : 'FAILED_FINAL';
     const extRef = responseOrError ? JSON.stringify(responseOrError) : null;
     await this.db.query(
       `UPDATE integration.api_operations
        SET status = $1, external_reference = $2, error_code = $3, updated_at = CURRENT_TIMESTAMP
        WHERE id = $4`,
-      [status, extRef, errorCode || null, operationId]
+      [dbStatus, extRef, errorCode || null, operationId]
     );
 
-    await this.recordEvent(operationId, status === 'completed' ? 'OPERATION_SUCCESS' : 'OPERATION_FAILURE', {
-      status,
+    await this.recordEvent(operationId, dbStatus === 'SUCCEEDED' ? 'OPERATION_SUCCESS' : 'OPERATION_FAILURE', {
+      status: dbStatus,
       errorCode,
       timestamp: new Date().toISOString()
     });

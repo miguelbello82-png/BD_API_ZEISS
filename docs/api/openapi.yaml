@@ -4,17 +4,25 @@ info:
   version: 1.0.0
   description: |
     API canônica oficial da plataforma independente BD_API_ZEISS.
-    Permite consumo externo seguro, autenticado e auditado de dados sincronizados da ZEISS.
+    Permite consumo externo seguro, autenticado, isolado por loja e auditado de dados sincronizados da ZEISS.
+    
+    ### Princípios de Governança e Arquitetura:
+    1. **Isolamento Absoluto por Loja:** Todas as consultas por loja (`/stores/{store_id}/...`) filtram estritamente pelo `store_id` autorizado no token/chave do consumidor. Zero vazamento interlojas.
+    2. **Segregação Histórica:** Registros pré-multi-loja (`store_id IS NULL`) permanecem intocados e são acessíveis exclusivamente via `/admin/unassigned-orders` com escopo `admin:historical:read`.
+    3. **Proteção de Mutações Externas:** Mutações ZEISS (VCH-002, VCH-003) exigem chave de idempotência (`Idempotency-Key`) no cabeçalho e chave de proteção operacional de runtime (`ALLOW_EXTERNAL_MUTATIONS=true`).
+    4. **Privacidade e Minimização:** Dados sensíveis de leads são pseudonimizados com HMAC-SHA256 (`email_hmac`).
     
     ### Classificação de Status dos Endpoints
-    - `[STATUS: OPERACIONAL]`: Implementado, validado com testes automatizados e apto para tráfego homologado.
-    - `[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]`: Código e rotas implementados; pendente homologação de credenciais/massa comercial real.
-    - `[STATUS: PLANEJADO]`: Contrato desenhado no roadmap da plataforma; implementação em fase posterior.
+    - `[STATUS: OPERACIONAL]`: Implementado, validado com testes automatizados e apto para tráfego homologado com dados locais sincronizados.
+    - `[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]`: Código e rotas implementados; pendente credenciais de produção ZEISS ou homologação de massa comercial ativa.
+    - `[STATUS: PLANEJADO]`: Contrato desenhado no roadmap da plataforma; retorno HTTP 501 Not Implemented.
+
 servers:
   - url: http://localhost:3000/api/v1
     description: Servidor Local de Desenvolvimento e Testes
   - url: https://api.zeiss-platform.internal/api/v1
-    description: Gateway Interno de Produção (Planejado)
+    description: Gateway Interno de Produção (Railway)
+
 paths:
   /health:
     get:
@@ -66,17 +74,26 @@ paths:
         - name: status
           in: query
           required: false
+          description: Filtro por status do pedido
+          schema:
+            type: string
+        - name: os_number
+          in: query
+          required: false
+          description: Filtro por número de ordem de serviço
           schema:
             type: string
         - name: start_date
           in: query
           required: false
+          description: Data inicial de entrada (YYYY-MM-DD)
           schema:
             type: string
             format: date
         - name: end_date
           in: query
           required: false
+          description: Data final de entrada (YYYY-MM-DD)
           schema:
             type: string
             format: date
@@ -121,6 +138,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/OrderDetailResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
         "404":
           $ref: '#/components/responses/NotFoundError'
 
@@ -153,11 +174,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TrackingResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
 
   /stores/{store_id}/campaigns:
     get:
       summary: Listar Campanhas Vigentes
-      description: Retorna as campanhas ativas e elegíveis para a unidade.
+      description: Retorna as campanhas ativas e elegíveis para a unidade de atendimento.
       tags:
         - "[STATUS: OPERACIONAL]"
         - Campanhas
@@ -178,11 +205,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CampaignsResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
 
-  /stores/{store_id}/campaigns/{campaign_id}/leads:
+  /stores/{store_id}/campaigns/{campaign_id}:
     get:
-      summary: Listar Leads da Campanha na Loja
-      description: Retorna leads associados à campanha e loja solicitadas. Hashes HMAC preservados.
+      summary: Detalhes da Campanha
+      description: Retorna informações cadastrais de uma campanha específica na loja.
       tags:
         - "[STATUS: OPERACIONAL]"
         - Campanhas
@@ -203,18 +234,149 @@ paths:
             type: string
       responses:
         "200":
+          description: Detalhes da campanha
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignDetailResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+
+  /stores/{store_id}/campaigns/{campaign_id}/leads:
+    get:
+      summary: Listar Leads da Campanha na Loja
+      description: Retorna leads associados à campanha e loja solicitadas com email pseudonimizado (HMAC-SHA256).
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Leads
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: campaign_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
           description: Lista de leads da campanha
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/LeadsResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+
+  /stores/{store_id}/leads/{voucher_code}:
+    get:
+      summary: Obter Lead por Código de Voucher
+      description: Retorna o lead e o vínculo com a campanha e loja correspondentes.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Leads
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: voucher_code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dados do lead associado ao voucher
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadDetailResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+
+  /stores/{store_id}/vouchers/{voucher_code}:
+    get:
+      summary: Consulta On-Demand de Voucher (VCH-001)
+      description: |
+        Recupera detalhes do voucher na base local ou via fallback em tempo real na API ZEISS (VCH-001).
+      tags:
+        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - Vouchers
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: store_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: voucher_code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detalhes do voucher
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoucherDetailResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
 
   /stores/{store_id}/vouchers/activate:
     post:
-      summary: Ativação/Resgate de Voucher (Mutativo)
+      summary: Ativação/Resgate de Voucher (VCH-003 Mutativo)
       description: |
         Executa a mutação VCH-003 na API ZEISS com chave de idempotência obrigatória.
-        Em caso de reenvio com mesma chave e payload, o resultado anterior é reproduzido sem disparar nova mutação.
+        Exige `ALLOW_EXTERNAL_MUTATIONS=true` na configuração de runtime.
+        Em caso de reenvio com a mesma chave e payload idêntico, o resultado anterior é reproduzido sem disparar nova mutação.
       tags:
         - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
         - Vouchers
@@ -249,18 +411,23 @@ paths:
                 $ref: '#/components/schemas/VoucherActivationResponse'
         "400":
           description: Requisição inválida ou ausência do header Idempotency-Key
+        "403":
+          description: Mutações desabilitadas (`MUTATION_DISABLED`) ou permissão insuficiente
         "409":
           description: Conflito de idempotência (payload divergente ou processamento em andamento)
 
   /stores/{store_id}/vouchers/generate:
     post:
-      summary: Geração de Vouchers ZEISS (Mutativo)
-      description: Emissão de novo voucher através de VCH-002.
+      summary: Geração de Vouchers ZEISS (VCH-002 Mutativo)
+      description: |
+        Emissão de novo voucher através da mutação VCH-002.
+        Exige `ALLOW_EXTERNAL_MUTATIONS=true` e cabeçalho `Idempotency-Key`.
       tags:
         - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
         - Vouchers
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       parameters:
         - name: store_id
           in: path
@@ -268,25 +435,154 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
+              $ref: '#/components/schemas/VoucherGenerateRequest'
       responses:
         "200":
           description: Voucher gerado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoucherGenerateResponse'
+        "400":
+          description: Payload inválido ou cabeçalho Idempotency-Key ausente
+        "403":
+          description: Mutações desabilitadas (`MUTATION_DISABLED`) ou escopo insuficiente
+        "409":
+          description: Conflito de idempotência
 
-  /stores/{store_id}/vouchers/{voucher_code}:
+  /products:
     get:
-      summary: Consulta On-Demand de Voucher
-      description: Recupera detalhes do voucher em tempo real via VCH-001.
+      summary: Catálogo Global de Produtos ZEISS
+      description: Retorna o catálogo unificado de produtos e lentes sincronizado na plataforma.
       tags:
-        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
-        - Vouchers
+        - "[STATUS: OPERACIONAL]"
+        - Catálogo
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: category
+          in: query
+          required: false
+          description: Categoria do produto (ex: monofocal, multifocal)
+          schema:
+            type: string
+        - name: search
+          in: query
+          required: false
+          description: Busca textual por nome ou código
+          schema:
+            type: string
+        - name: active
+          in: query
+          required: false
+          description: Filtrar por produtos ativos ('true' / 'false')
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Lista paginada de produtos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductsListResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+
+  /products/{product_code}:
+    get:
+      summary: Detalhes do Produto
+      description: Retorna a ficha técnica e dados consolidados do produto.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Catálogo
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: product_code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detalhes do produto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductDetailResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+
+  /products/{product_code}/services:
+    get:
+      summary: Tratamentos e Serviços do Produto
+      description: Retorna tratamentos (antirreflexo, colorações, adicionais) compatíveis com o produto.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Catálogo
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: product_code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Serviços e tratamentos compatíveis
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductServicesResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+
+  /stores/{store_id}/financial/receivables:
+    get:
+      summary: Contas a Receber / Faturas da Loja
+      description: Retorna a posição financeira e títulos/duplicatas sincronizados para a loja.
+      tags:
+        - "[STATUS: OPERACIONAL]"
+        - Financeiro
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
       parameters:
         - name: store_id
           in: path
@@ -294,14 +590,47 @@ paths:
           schema:
             type: string
             format: uuid
-        - name: voucher_code
-          in: path
-          required: true
+        - name: status
+          in: query
+          required: false
+          description: Status do título (aberto, pago, vencido)
           schema:
             type: string
+        - name: start_due_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: end_due_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
       responses:
         "200":
-          description: Detalhes do voucher
+          description: Lista de títulos a receber
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceivablesListResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
 
   /stores/{store_id}/financial/boletos/{boleto_id}:
     get:
@@ -312,6 +641,7 @@ paths:
         - Financeiro
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       parameters:
         - name: store_id
           in: path
@@ -327,8 +657,18 @@ paths:
       responses:
         "200":
           description: Dados para visualização do boleto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoletoDetailResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
 
-  /stores/{store_id}/financial/danfe/{nf_key}:
+  /stores/{store_id}/financial/danfe/{nf_number}:
     get:
       summary: Recuperação Transitória de DANFE/XML (FIN-003)
       description: Consulta transitória de documento fiscal na ZEISS.
@@ -337,6 +677,7 @@ paths:
         - Financeiro
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       parameters:
         - name: store_id
           in: path
@@ -344,7 +685,7 @@ paths:
           schema:
             type: string
             format: uuid
-        - name: nf_key
+        - name: nf_number
           in: path
           required: true
           schema:
@@ -352,6 +693,16 @@ paths:
       responses:
         "200":
           description: Dados ou link do documento fiscal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DanfeDetailResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "403":
+          $ref: '#/components/responses/ForbiddenError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
 
   /admin/unassigned-orders:
     get:
@@ -365,6 +716,7 @@ paths:
         - Administração
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       parameters:
         - name: page
           in: query
@@ -383,6 +735,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UnassignedOrdersResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
         "403":
           $ref: '#/components/responses/ForbiddenError'
 
@@ -395,6 +749,7 @@ paths:
         - Administração
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       requestBody:
         required: true
         content:
@@ -414,6 +769,7 @@ paths:
         - Administração
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       parameters:
         - name: store_id
           in: path
@@ -434,6 +790,7 @@ paths:
         - Vouchers 2FA
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       responses:
         "501":
           description: Funcionalidade planejada no roadmap
@@ -447,6 +804,7 @@ paths:
         - Vouchers 2FA
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       responses:
         "501":
           description: Funcionalidade planejada no roadmap
@@ -460,6 +818,7 @@ paths:
         - Vendas
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       responses:
         "501":
           description: Funcionalidade planejada no roadmap
@@ -537,6 +896,22 @@ components:
               type: string
               format: date-time
 
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 50
+        total:
+          type: integer
+          example: 128
+        totalPages:
+          type: integer
+          example: 3
+
     OrdersListResponse:
       type: object
       properties:
@@ -594,6 +969,10 @@ components:
               type: array
               items:
                 type: object
+            fiscal_documents:
+              type: array
+              items:
+                type: object
 
     TrackingResponse:
       type: object
@@ -618,26 +997,96 @@ components:
       properties:
         success:
           type: boolean
+          example: true
         data:
           type: object
           properties:
             campaigns:
               type: array
               items:
-                type: object
+                $ref: '#/components/schemas/CampaignSummary'
+
+    CampaignDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/CampaignSummary'
+
+    CampaignSummary:
+      type: object
+      properties:
+        campaign_id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        eligible:
+          type: boolean
 
     LeadsResponse:
       type: object
       properties:
         success:
           type: boolean
+          example: true
         data:
           type: object
           properties:
             leads:
               type: array
               items:
-                type: object
+                $ref: '#/components/schemas/LeadSummary'
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    LeadDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/LeadSummary'
+
+    LeadSummary:
+      type: object
+      properties:
+        lead_id:
+          type: string
+        store_id:
+          type: string
+        campaign_id:
+          type: string
+        voucher_code:
+          type: string
+        email_hmac:
+          type: string
+          description: Email pseudonimizado via HMAC-SHA256
+        status:
+          type: string
+
+    VoucherDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            voucherCode:
+              type: string
+            status:
+              type: string
+            campaignId:
+              type: string
+            source:
+              type: string
+              example: "local"
 
     VoucherActivationRequest:
       type: object
@@ -666,6 +1115,158 @@ components:
               type: boolean
             _replayed:
               type: boolean
+
+    VoucherGenerateRequest:
+      type: object
+      required:
+        - campaignId
+      properties:
+        campaignId:
+          type: string
+        storeCode:
+          type: string
+        leadInfo:
+          type: object
+
+    VoucherGenerateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            voucherCode:
+              type: string
+            campaignId:
+              type: string
+            _replayed:
+              type: boolean
+
+    ProductsListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            products:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProductSummary'
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    ProductDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/ProductSummary'
+
+    ProductSummary:
+      type: object
+      properties:
+        product_code:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+        is_active:
+          type: boolean
+
+    ProductServicesResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            product_code:
+              type: string
+            services:
+              type: array
+              items:
+                type: object
+                properties:
+                  service_code:
+                    type: string
+                  service_name:
+                    type: string
+                  category:
+                    type: string
+
+    ReceivablesListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            receivables:
+              type: array
+              items:
+                $ref: '#/components/schemas/ReceivableSummary'
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    ReceivableSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        store_id:
+          type: string
+        doc_number:
+          type: string
+        due_date:
+          type: string
+          format: date
+        amount:
+          type: number
+        status:
+          type: string
+
+    BoletoDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            boletoId:
+              type: string
+            linhaDigitavel:
+              type: string
+            url:
+              type: string
+
+    DanfeDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            nfNumber:
+              type: string
+            xmlUrl:
+              type: string
+            danfePdfUrl:
+              type: string
 
     StoreRegistrationRequest:
       type: object
@@ -722,15 +1323,3 @@ components:
                 $ref: '#/components/schemas/OrderSummary'
             pagination:
               $ref: '#/components/schemas/PaginationMeta'
-
-    PaginationMeta:
-      type: object
-      properties:
-        page:
-          type: integer
-        limit:
-          type: integer
-        total:
-          type: integer
-        totalPages:
-          type: integer

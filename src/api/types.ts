@@ -24,6 +24,7 @@ export type ApiErrorCode =
   | 'NOT_FOUND'
   | 'IDEMPOTENCY_CONFLICT'
   | 'MISSING_IDEMPOTENCY_KEY'
+  | 'MUTATION_DISABLED'
   | 'INTERNAL_ERROR';
 
 export class ApiError extends Error {
@@ -52,5 +53,22 @@ export interface StandardApiResponse<T = unknown> {
     page?: number;
     limit?: number;
     total?: number;
+    totalPages?: number;
   };
 }
+
+export interface VoucherGenerateRequestPayload {
+  campaignId: string;
+  name: string;
+  email: string;
+  phone?: string;
+  cpf?: string;
+  zipcode?: string;
+  city?: string;
+  state?: string;
+  source?: number;
+  sendmail?: 'S' | 'N';
+  termssn?: 'S' | 'N';
+  comunicadossn?: 'S' | 'N';
+}
+
