@@ -313,7 +313,6 @@ export class CentralMultiStoreScheduler {
       // 5. Update State and Health
       if (ownershipLost) {
         this.logger.error('CentralScheduler', 'Job completed but lease ownership was lost. State not advanced.', loggerCtx);
-        await healthRepo.recordFailure(provider, domain, operation);
         return 'EXECUTED_FAILED';
       }
 
@@ -321,11 +320,10 @@ export class CentralMultiStoreScheduler {
         const stillOwner = await leaseRepo.renew(provider, domain, operation, this.workerId, policy.lease_ttl_seconds).catch(() => false);
         if (!stillOwner) {
           this.logger.error('CentralScheduler', 'Lost lease ownership prior to state advancement', loggerCtx);
-          await healthRepo.recordFailure(provider, domain, operation);
           return 'EXECUTED_FAILED';
         }
 
-        await healthRepo.recordSuccess(provider, domain, operation);
+        await healthRepo.recordSuccess(provider, domain, operation, this.workerId);
         await stateRepo.upsert({
           provider,
           domain,
@@ -337,13 +335,19 @@ export class CentralMultiStoreScheduler {
         this.logger.info('CentralScheduler', 'Job completed successfully for store', { ...loggerCtx, metrics: result.metrics });
         return 'EXECUTED_SUCCESS';
       } else {
-        await healthRepo.recordFailure(provider, domain, operation);
+        if (!ownershipLost) {
+          await healthRepo.recordFailure(provider, domain, operation, this.workerId).catch((err) => {
+            this.logger.warn('CentralScheduler', 'Could not record failure status in health repo due to stale lease ownership', { ...loggerCtx, error: err?.message });
+          });
+        }
         this.logger.error('CentralScheduler', 'Job failed for store', { ...loggerCtx, error: result.error?.message });
         return 'EXECUTED_FAILED';
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      await healthRepo.recordFailure(provider, domain, operation);
+      if (!ownershipLost) {
+        await healthRepo.recordFailure(provider, domain, operation, this.workerId).catch(() => {});
+      }
       this.logger.error('CentralScheduler', 'Fatal execution error for store', { ...loggerCtx, error: msg });
       if (msg.startsWith('Missing job for')) {
         return 'CONFIGURATION_ERROR';

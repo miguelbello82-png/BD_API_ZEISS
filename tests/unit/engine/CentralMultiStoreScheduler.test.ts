@@ -435,6 +435,7 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
     } = { cursor_value: null, last_sync: null };
 
     const ordersTable: Array<{ order_number: string; store_id: string; payload: string }> = [];
+    const healthTable: Map<string, { status: string; last_success?: Date; last_failure?: Date }> = new Map();
 
     // Factory to create DB executor for simulated Postgres
     const createSimulatedDb = () => {
@@ -453,7 +454,7 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
           }
 
           // store_sync_leases tryAcquire
-          if (sql.includes('integration.store_sync_leases') && sql.includes('INSERT INTO')) {
+          if (sql.includes('INSERT INTO integration.store_sync_leases')) {
             const [storeId, provider, domain, operation, ownerToken, ttlSeconds] = params || [];
             const now = Date.now();
             if (!activeLease || activeLease.expires_at < now) {
@@ -471,7 +472,7 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
           }
 
           // store_sync_leases FOR UPDATE / findActive
-          if (sql.includes('FROM integration.store_sync_leases') && sql.includes('SELECT') && !sql.includes('integration.store_sync_state')) {
+          if (sql.includes('FROM integration.store_sync_leases') && sql.includes('SELECT') && !sql.includes('integration.store_sync_state') && !sql.includes('integration.store_provider_health')) {
             if (sql.includes('FOR UPDATE')) {
               if (activeLease) {
                 return [{
@@ -500,7 +501,7 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
           }
 
           // store_sync_leases renew
-          if (sql.includes('integration.store_sync_leases') && sql.includes('UPDATE')) {
+          if (sql.includes('UPDATE integration.store_sync_leases')) {
             const [storeId, provider, domain, operation, ownerToken, ttlSeconds] = params || [];
             if (activeLease && activeLease.owner_token === ownerToken && activeLease.expires_at >= Date.now()) {
               activeLease.expires_at = Date.now() + ttlSeconds * 1000;
@@ -534,6 +535,52 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
             const [orderNumber, osNumber, status, codsit, entryDate, expectedDate, storeId] = params || [];
             ordersTable.push({ order_number: orderNumber, store_id: storeId, payload: status });
             return [];
+          }
+
+          // store_provider_health SELECT
+          if (sql.includes('integration.store_provider_health') && sql.includes('SELECT') && !sql.includes('INSERT')) {
+            const [storeId, provider, domain, operation] = params || [];
+            const key = `${storeId}:${provider}:${domain}:${operation}`;
+            const record = healthTable.get(key);
+            if (record) {
+              return [{
+                provider,
+                domain,
+                operation,
+                status: record.status,
+                last_success: record.last_success,
+                last_failure: record.last_failure
+              }];
+            }
+            return [];
+          }
+
+          // store_provider_health INSERT
+          if (sql.includes('integration.store_provider_health') && sql.includes('INSERT')) {
+            const [storeId, provider, domain, operation, leaseToken] = params || [];
+            const key = `${storeId}:${provider}:${domain}:${operation}`;
+            const isSuccess = sql.includes("'HEALTHY'");
+
+            // If query enforces atomic lease check via WHERE EXISTS
+            if (sql.includes('WHERE EXISTS') && sql.includes('integration.store_sync_leases')) {
+              const matchesLease = activeLease &&
+                activeLease.owner_token === leaseToken &&
+                activeLease.expires_at >= Date.now();
+              if (!matchesLease) {
+                return []; // Stale update rejected: zero rows affected
+              }
+            }
+
+            const existing = healthTable.get(key) || { status: isSuccess ? 'HEALTHY' : 'DEGRADED' };
+            if (isSuccess) {
+              existing.status = 'HEALTHY';
+              existing.last_success = new Date();
+            } else {
+              existing.status = 'DEGRADED';
+              existing.last_failure = new Date();
+            }
+            healthTable.set(key, existing);
+            return [{ store_id: storeId }];
           }
 
           return [];
@@ -675,5 +722,263 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
     expect(currentState.cursor_value).toBe(JSON.stringify({ lastEndDate: '2026-10-20' }));
     expect(ordersTable.length).toBe(1);
     expect(ordersTable[0].order_number).toBe('ORD-FRESH-FROM-B');
+  });
+
+  it('ACH-02: should prevent tardy/stale Instance A from overwriting store_provider_health after Instance B succeeded', async () => {
+    let activeLease: {
+      store_id: string;
+      provider: string;
+      domain: string;
+      operation: string;
+      owner_token: string;
+      expires_at: number;
+    } | null = null;
+
+    const healthTable: Map<string, { status: string; last_success?: Date; last_failure?: Date }> = new Map();
+
+    const createSimulatedDb = () => {
+      const db: IDatabaseExecutor = {
+        query: jest.fn().mockImplementation(async (sql: string, params?: any[]) => {
+          // store_sync_leases tryAcquire
+          if (sql.includes('integration.store_sync_leases') && sql.includes('INSERT') && !sql.includes('integration.store_sync_state') && !sql.includes('integration.store_provider_health')) {
+            const [storeId, provider, domain, operation, ownerToken, ttlSeconds] = params || [];
+            const now = Date.now();
+            if (!activeLease || activeLease.expires_at < now) {
+              activeLease = {
+                store_id: storeId,
+                provider,
+                domain,
+                operation,
+                owner_token: ownerToken,
+                expires_at: now + ttlSeconds * 1000
+              };
+              return [{ acquired: true }];
+            }
+            return [];
+          }
+
+          // store_sync_leases FOR UPDATE / findActive
+          if (sql.includes('FROM integration.store_sync_leases') && sql.includes('SELECT') && !sql.includes('integration.store_sync_state') && !sql.includes('integration.store_provider_health')) {
+            if (sql.includes('FOR UPDATE')) {
+              if (activeLease) {
+                return [{
+                  store_id: activeLease.store_id,
+                  provider: activeLease.provider,
+                  domain: activeLease.domain,
+                  operation: activeLease.operation,
+                  owner_token: activeLease.owner_token,
+                  expires_at: new Date(activeLease.expires_at),
+                  is_valid: activeLease.expires_at >= Date.now()
+                }];
+              }
+              return [];
+            }
+            if (activeLease && activeLease.expires_at >= Date.now()) {
+              return [{
+                store_id: activeLease.store_id,
+                provider: activeLease.provider,
+                domain: activeLease.domain,
+                operation: activeLease.operation,
+                owner_token: activeLease.owner_token,
+                expires_at: new Date(activeLease.expires_at)
+              }];
+            }
+            return [];
+          }
+
+          // store_sync_leases renew
+          if (sql.includes('UPDATE integration.store_sync_leases')) {
+            const [storeId, provider, domain, operation, ownerToken, ttlSeconds] = params || [];
+            if (activeLease && activeLease.owner_token === ownerToken && activeLease.expires_at >= Date.now()) {
+              activeLease.expires_at = Date.now() + ttlSeconds * 1000;
+              return [{ renewed: true }];
+            }
+            return [];
+          }
+
+          // store_sync_leases release
+          if (sql.includes('DELETE FROM integration.store_sync_leases')) {
+            const [storeId, provider, domain, operation, ownerToken] = params || [];
+            if (activeLease && activeLease.owner_token === ownerToken) {
+              activeLease = null;
+            }
+            return [];
+          }
+
+          // store_sync_state SELECT / INSERT
+          if (sql.includes('integration.store_sync_state')) {
+            if (sql.includes('INSERT INTO')) {
+              const [storeId, provider, domain, operation, lastSync, cursorValue, leaseToken] = params || [];
+              if (activeLease && activeLease.owner_token === leaseToken && activeLease.expires_at >= Date.now()) {
+                return [{ store_id: storeId }];
+              }
+              return [];
+            }
+            return [{ provider: 'zeiss', domain: 'orders', operation: 'discovery', last_sync: null, cursor_value: null }];
+          }
+
+          // store_provider_health SELECT
+          if (sql.includes('integration.store_provider_health') && sql.includes('SELECT') && !sql.includes('INSERT')) {
+            const [storeId, provider, domain, operation] = params || [];
+            const key = `${storeId}:${provider}:${domain}:${operation}`;
+            const record = healthTable.get(key);
+            if (record) {
+              return [{
+                provider,
+                domain,
+                operation,
+                status: record.status,
+                last_success: record.last_success,
+                last_failure: record.last_failure
+              }];
+            }
+            return [];
+          }
+
+          // store_provider_health INSERT
+          if (sql.includes('integration.store_provider_health') && sql.includes('INSERT')) {
+            const [storeId, provider, domain, operation, leaseToken] = params || [];
+            const key = `${storeId}:${provider}:${domain}:${operation}`;
+            const isSuccess = sql.includes("'HEALTHY'");
+
+            // If query enforces atomic lease check via WHERE EXISTS
+            if (sql.includes('WHERE EXISTS') && sql.includes('integration.store_sync_leases')) {
+              const matchesLease = activeLease &&
+                activeLease.owner_token === leaseToken &&
+                activeLease.expires_at >= Date.now();
+              if (!matchesLease) {
+                return []; // Stale update rejected: zero rows affected
+              }
+            }
+
+            const existing = healthTable.get(key) || { status: isSuccess ? 'HEALTHY' : 'DEGRADED' };
+            if (isSuccess) {
+              existing.status = 'HEALTHY';
+              existing.last_success = new Date();
+            } else {
+              existing.status = 'DEGRADED';
+              existing.last_failure = new Date();
+            }
+            healthTable.set(key, existing);
+            return [{ store_id: storeId }];
+          }
+
+          return [];
+        }),
+        transaction: jest.fn().mockImplementation(async (cb: (client: IDatabaseExecutor) => Promise<any>) => {
+          return cb(db);
+        })
+      };
+      return db;
+    };
+
+    const dbA = createSimulatedDb();
+    const dbB = createSimulatedDb();
+
+    const schedulerA = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: dbA,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    const schedulerB = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: dbB,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    const testPolicy: SyncPolicy = {
+      ...sampleCentralPolicy,
+      timeout_seconds: 5,
+      lease_ttl_seconds: 30,
+      max_retries: 0
+    };
+
+    // Deferred promise for Job A
+    let resolveJobA!: (result: JobResult) => void;
+    const jobAPromise = new Promise<JobResult>((resolve) => {
+      resolveJobA = resolve;
+    });
+
+    const tardyJobA: IJob = {
+      execute: jest.fn().mockImplementation(async (): Promise<JobResult> => {
+        return jobAPromise;
+      })
+    };
+
+    const successJobB: IJob = {
+      execute: jest.fn().mockImplementation(async (): Promise<JobResult> => {
+        return {
+          success: true,
+          retryable: false,
+          cursorValue: JSON.stringify({ lastEndDate: '2026-10-20' })
+        };
+      })
+    };
+
+    // Step 1: Instância A adquire lease e inicia execução do job A
+    const mockRegistryA = new JobRegistry();
+    mockRegistryA.register('zeiss', 'orders', 'discovery', tardyJobA);
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValueOnce({
+      registry: mockRegistryA
+    } as any);
+
+    const execPromiseA = schedulerA.executeStorePolicy(store1Context, testPolicy, { force: true });
+
+    // Aguarda tick para Instância A adquirir lease e entrar em execução
+    await new Promise(r => setTimeout(r, 20));
+    expect((activeLease as any)?.owner_token).toBe((schedulerA as any).workerId);
+
+    // Step 2: O lease de A expira enquanto o job A ainda está suspenso
+    (activeLease as any).expires_at = Date.now() - 1000;
+
+    // Step 3: Instância B adquire novo lease e executa com sucesso
+    const mockRegistryB = new JobRegistry();
+    mockRegistryB.register('zeiss', 'orders', 'discovery', successJobB);
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValueOnce({
+      registry: mockRegistryB
+    } as any);
+
+    const resultB = await schedulerB.executeStorePolicy(store1Context, testPolicy, { force: true });
+    expect(resultB).toBe('EXECUTED_SUCCESS');
+
+    // Verifica que Instância B registrou status HEALTHY em store_provider_health
+    const healthKey = `${store1Context.storeId}:zeiss:orders:discovery`;
+    expect(healthTable.get(healthKey)?.status).toBe('HEALTHY');
+
+    // Step 4: Job A finalmente conclui (tardiamente)
+    resolveJobA({
+      success: true,
+      retryable: false,
+      cursorValue: JSON.stringify({ lastEndDate: '2026-10-19' })
+    });
+
+    const resultA = await execPromiseA;
+    expect(resultA).toBe('EXECUTED_FAILED');
+
+    // Step 5: CRÍTICO: O estado registrado por B DEVE permanecer HEALTHY e não ser sobrescrito por A!
+    expect(healthTable.get(healthKey)?.status).toBe('HEALTHY');
+
+    // Step 6: Falhas legítimas enquanto detém o lease continuam devidamente observáveis
+    const failingJob: IJob = {
+      execute: jest.fn().mockResolvedValue({
+        success: false,
+        retryable: false,
+        error: new Error('Legitimate ZEISS API Failure')
+      })
+    };
+    const mockRegistryFail = new JobRegistry();
+    mockRegistryFail.register('zeiss', 'orders', 'discovery', failingJob);
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValueOnce({
+      registry: mockRegistryFail
+    } as any);
+
+    const failResult = await schedulerB.executeStorePolicy(store1Context, testPolicy, { force: true });
+    expect(failResult).toBe('EXECUTED_FAILED');
+    expect(healthTable.get(healthKey)?.status).toBe('DEGRADED');
   });
 });
