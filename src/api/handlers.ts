@@ -9,7 +9,8 @@ import { AuditService } from './audit';
 import { VouchersProvider } from '../providers/vouchers';
 import { FinancialProvider } from '../providers/financial';
 import { PgLeadsRepository } from '../repositories/postgres/LeadsRepository';
-import { LeadMapper } from '../engine/Mappers';
+import { PgReceivablesRepository } from '../repositories/postgres/ReceivablesRepository';
+import { LeadMapper, ReceivableMapper } from '../engine/Mappers';
 import { zeissConfig } from '../config/config';
 
 export interface PaginationParams {
@@ -811,11 +812,49 @@ export class ApiHandlers {
 
     const whereClause = conditions.join(' AND ');
 
-    const countRows = await this.db.query<{ count: string }>(
+    let countRows = await this.db.query<{ count: string }>(
       `SELECT COUNT(*) as count FROM zeiss.receivables WHERE ${whereClause}`,
       params
     );
-    const total = parseInt(countRows[0]?.count || '0', 10);
+    let total = parseInt(countRows[0]?.count || '0', 10);
+
+    // On-demand hydration if store receivables not yet synced
+    if (total === 0 && this.storeResolutionService) {
+      try {
+        const context = await this.storeResolutionService.resolveStore(storeId);
+        const financialProvider = new FinancialProvider(context);
+
+        const now = new Date();
+        const defaultStart = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const defaultEnd = now.toISOString().slice(0, 10);
+        const periodStart = (query.start_date as string) || defaultStart;
+        const periodEnd = (query.end_date as string) || defaultEnd;
+
+        const rawReceivables = await financialProvider.getReceivables(periodStart, periodEnd, 'all', '0');
+        if (Array.isArray(rawReceivables) && rawReceivables.length > 0) {
+          const normalized = rawReceivables.map(raw => {
+            try {
+              return ReceivableMapper.normalize(raw);
+            } catch {
+              return null;
+            }
+          }).filter((r): r is NonNullable<typeof r> => r !== null);
+
+          if (normalized.length > 0) {
+            const receivablesRepo = new PgReceivablesRepository(this.db, storeId);
+            await receivablesRepo.upsertMany(normalized, storeId);
+
+            countRows = await this.db.query<{ count: string }>(
+              `SELECT COUNT(*) as count FROM zeiss.receivables WHERE ${whereClause}`,
+              params
+            );
+            total = parseInt(countRows[0]?.count || '0', 10);
+          }
+        }
+      } catch {
+        // Cleanly handle upstream or resolution issues
+      }
+    }
 
     const rows = await this.db.query(
       `SELECT 
@@ -880,6 +919,9 @@ export class ApiHandlers {
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
+        throw new ApiError(404, 'NOT_FOUND', `Boleto '${boletoId}' for dueDate '${dueDate}' not found`);
+      }
       throw new ApiError(500, 'INTERNAL_ERROR', `Boleto fetch failed: ${msg}`);
     }
   }
@@ -908,6 +950,9 @@ export class ApiHandlers {
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
+        throw new ApiError(404, 'NOT_FOUND', `DANFE for NF '${nfNumber}' series '${series}' not found`);
+      }
       throw new ApiError(500, 'INTERNAL_ERROR', `DANFE fetch failed: ${msg}`);
     }
   }
