@@ -62,7 +62,7 @@ export class PgCampaignsRepository implements ICampaignsRepository {
             targetStoreId,
             campaign.campaign_id,
             campaign.status,
-            campaign.aceite
+            campaign.aceite ?? false
           ]);
         }
       }

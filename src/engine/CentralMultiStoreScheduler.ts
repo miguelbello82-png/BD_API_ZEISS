@@ -170,7 +170,32 @@ export class CentralMultiStoreScheduler {
     const healthRepo = new PgStoreProviderHealthRepository(this.deps.db, store.storeId);
 
     // 1. Check if due for this store (using central interval and store checkpoint)
-    const storeState = await stateRepo.findByKey(provider, domain, operation);
+    let storeState = await stateRepo.findByKey(provider, domain, operation);
+
+    // Bootstrap handoff: if orders continuous discovery has no cursor, check if orders bootstrap completed
+    if (domain === 'orders' && operation === 'discovery' && (!storeState || !storeState.cursor_value)) {
+      const bootstrapState = await stateRepo.findByKey(provider, 'orders', 'bootstrap');
+      if (bootstrapState && bootstrapState.cursor_value) {
+        try {
+          const bCursor = typeof bootstrapState.cursor_value === 'string'
+            ? JSON.parse(bootstrapState.cursor_value)
+            : bootstrapState.cursor_value;
+          if (bCursor && bCursor.lastCompletedDate) {
+            storeState = {
+              provider,
+              domain,
+              operation,
+              last_sync: bootstrapState.last_sync || new Date(this.clock.now()),
+              cursor_value: JSON.stringify({ lastEndDate: bCursor.lastCompletedDate })
+            };
+            this.logger.info('CentralScheduler', `Seeded orders discovery cursor from completed bootstrap checkpoint: ${bCursor.lastCompletedDate}`, loggerCtx);
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+    }
+
     if (!options?.force && !this.isDue(policy, storeState)) {
       this.logger.debug('CentralScheduler', 'Policy not due for store, skipping', loggerCtx);
       return 'SKIPPED_NOT_DUE';
@@ -190,14 +215,19 @@ export class CentralMultiStoreScheduler {
       return 'SKIPPED_LEASE';
     }
 
-    // 3. Keepalive setup
+    // 3. Keepalive setup (interruptible sleep to prevent lingering on job finish)
     const keepaliveInterval = Math.max(1000, (policy.lease_ttl_seconds / 2) * 1000);
     let ownershipLost = false;
     let keepaliveActive = true;
 
     const runKeepalive = async () => {
       while (keepaliveActive) {
-        await this.sleeper.sleep(keepaliveInterval);
+        const sleepChunk = 1000;
+        let elapsed = 0;
+        while (keepaliveActive && elapsed < keepaliveInterval) {
+          await this.sleeper.sleep(sleepChunk);
+          elapsed += sleepChunk;
+        }
         if (!keepaliveActive) break;
         try {
           const renewed = await leaseRepo.renew(provider, domain, operation, this.workerId, policy.lease_ttl_seconds);
