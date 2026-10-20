@@ -1,4 +1,4 @@
-import { JobRegistry, IJob, JobContext } from './JobRegistry';
+import { JobRegistry, IJob, JobContext, JobResult } from './JobRegistry';
 import {
   ISyncPolicyRepository,
   SyncPolicy,
@@ -169,58 +169,64 @@ export class CentralMultiStoreScheduler {
     const leaseRepo = new PgStoreSyncLeaseRepository(this.deps.db, store.storeId);
     const healthRepo = new PgStoreProviderHealthRepository(this.deps.db, store.storeId);
 
-    // 1. Check if due for this store (using central interval and store checkpoint)
-    let storeState = await stateRepo.findByKey(provider, domain, operation);
+    // Helper: resolves store state with bootstrap handoff
+    const resolveStoreState = async (): Promise<SyncState | null> => {
+      let state = await stateRepo.findByKey(provider, domain, operation);
 
-    // Bootstrap handoff: if orders continuous discovery has no cursor, check if orders bootstrap completed
-    if (domain === 'orders' && operation === 'discovery' && (!storeState || !storeState.cursor_value)) {
-      const bootstrapState = await stateRepo.findByKey(provider, 'orders', 'bootstrap');
-      if (bootstrapState && bootstrapState.cursor_value) {
-        try {
-          const bCursor = typeof bootstrapState.cursor_value === 'string'
-            ? JSON.parse(bootstrapState.cursor_value)
-            : bootstrapState.cursor_value;
-          if (bCursor && bCursor.lastCompletedDate) {
-            storeState = {
-              provider,
-              domain,
-              operation,
-              last_sync: bootstrapState.last_sync || new Date(this.clock.now()),
-              cursor_value: JSON.stringify({ lastEndDate: bCursor.lastCompletedDate })
-            };
-            this.logger.info('CentralScheduler', `Seeded orders discovery cursor from completed bootstrap checkpoint: ${bCursor.lastCompletedDate}`, loggerCtx);
+      // Bootstrap handoff: if orders continuous discovery has no cursor, check if orders bootstrap completed
+      if (domain === 'orders' && operation === 'discovery' && (!state || !state.cursor_value)) {
+        const bootstrapState = await stateRepo.findByKey(provider, 'orders', 'bootstrap');
+        if (bootstrapState && bootstrapState.cursor_value) {
+          try {
+            const bCursor = typeof bootstrapState.cursor_value === 'string'
+              ? JSON.parse(bootstrapState.cursor_value)
+              : bootstrapState.cursor_value;
+            if (bCursor && bCursor.lastCompletedDate) {
+              state = {
+                provider,
+                domain,
+                operation,
+                last_sync: bootstrapState.last_sync || new Date(this.clock.now()),
+                cursor_value: JSON.stringify({ lastEndDate: bCursor.lastCompletedDate })
+              };
+              this.logger.info('CentralScheduler', `Seeded orders discovery cursor from completed bootstrap checkpoint: ${bCursor.lastCompletedDate}`, loggerCtx);
+            }
+          } catch {
+            // ignore parse errors
           }
-        } catch {
-          // ignore parse errors
         }
       }
-    }
 
-    // Bootstrap handoff: if receivables sync has no cursor, check if financial bootstrap completed
-    if ((domain === 'receivables' || domain === 'financial') && operation === 'sync' && (!storeState || !storeState.cursor_value)) {
-      const bootstrapState = await stateRepo.findByKey(provider, 'financial', 'bootstrap');
-      if (bootstrapState && bootstrapState.cursor_value) {
-        try {
-          const bCursor = typeof bootstrapState.cursor_value === 'string'
-            ? JSON.parse(bootstrapState.cursor_value)
-            : bootstrapState.cursor_value;
-          if (bCursor && bCursor.lastCompletedDate) {
-            storeState = {
-              provider,
-              domain,
-              operation,
-              last_sync: bootstrapState.last_sync || new Date(this.clock.now()),
-              cursor_value: JSON.stringify({ lastEndDate: bCursor.lastCompletedDate })
-            };
-            this.logger.info('CentralScheduler', `Seeded receivables cursor from completed bootstrap checkpoint: ${bCursor.lastCompletedDate}`, loggerCtx);
+      // Bootstrap handoff: if receivables sync has no cursor, check if financial bootstrap completed
+      if ((domain === 'receivables' || domain === 'financial') && operation === 'sync' && (!state || !state.cursor_value)) {
+        const bootstrapState = await stateRepo.findByKey(provider, 'financial', 'bootstrap');
+        if (bootstrapState && bootstrapState.cursor_value) {
+          try {
+            const bCursor = typeof bootstrapState.cursor_value === 'string'
+              ? JSON.parse(bootstrapState.cursor_value)
+              : bootstrapState.cursor_value;
+            if (bCursor && bCursor.lastCompletedDate) {
+              state = {
+                provider,
+                domain,
+                operation,
+                last_sync: bootstrapState.last_sync || new Date(this.clock.now()),
+                cursor_value: JSON.stringify({ lastEndDate: bCursor.lastCompletedDate })
+              };
+              this.logger.info('CentralScheduler', `Seeded receivables cursor from completed bootstrap checkpoint: ${bCursor.lastCompletedDate}`, loggerCtx);
+            }
+          } catch {
+            // ignore parse errors
           }
-        } catch {
-          // ignore parse errors
         }
       }
-    }
 
-    if (!options?.force && !this.isDue(policy, storeState)) {
+      return state;
+    };
+
+    // 1. Pre-lease fast check: verify if policy is due before attempting lease acquisition
+    const preLeaseState = await resolveStoreState();
+    if (!options?.force && !this.isDue(policy, preLeaseState)) {
       this.logger.debug('CentralScheduler', 'Policy not due for store, skipping', loggerCtx);
       return 'SKIPPED_NOT_DUE';
     }
@@ -239,19 +245,24 @@ export class CentralMultiStoreScheduler {
       return 'SKIPPED_LEASE';
     }
 
+    // ACH-01: Authoritative checkpoint read AFTER lease acquisition
+    // Ensures execution never starts with a stale checkpoint if a concurrent worker just completed.
+    const storeState = await resolveStoreState();
+    if (!options?.force && !this.isDue(policy, storeState)) {
+      this.logger.info('CentralScheduler', 'Policy no longer due after acquiring lease (updated by concurrent worker), releasing lease', loggerCtx);
+      await leaseRepo.release(provider, domain, operation, this.workerId).catch(() => {});
+      return 'SKIPPED_NOT_DUE';
+    }
+
     // 3. Keepalive setup (interruptible sleep to prevent lingering on job finish)
     const keepaliveInterval = Math.max(1000, (policy.lease_ttl_seconds / 2) * 1000);
     let ownershipLost = false;
     let keepaliveActive = true;
+    let hasUncooperativeJob = false;
 
     const runKeepalive = async () => {
       while (keepaliveActive) {
-        const sleepChunk = 1000;
-        let elapsed = 0;
-        while (keepaliveActive && elapsed < keepaliveInterval) {
-          await this.sleeper.sleep(sleepChunk);
-          elapsed += sleepChunk;
-        }
+        await this.sleeper.sleep(keepaliveInterval);
         if (!keepaliveActive) break;
         try {
           const renewed = await leaseRepo.renew(provider, domain, operation, this.workerId, policy.lease_ttl_seconds);
@@ -282,8 +293,13 @@ export class CentralMultiStoreScheduler {
         throw new Error(`Missing job for ${provider}:${domain}:${operation}`);
       }
 
-      // Execute job with retries
+      // Execute job with retries and timeout containment
       const result = await this.executeWithRetry(job, storeState, policy, () => ownershipLost);
+
+      if ((result as any)?.uncooperative) {
+        hasUncooperativeJob = true;
+        keepaliveActive = false;
+      }
 
       // 5. Update State and Health
       if (ownershipLost) {
@@ -326,10 +342,17 @@ export class CentralMultiStoreScheduler {
       return 'EXECUTED_FAILED';
     } finally {
       keepaliveActive = false;
-      await keepalivePromise.catch(() => {});
+      // Do not await keepalivePromise here as sleeper may be sleeping; it exits cleanly when it wakes.
       if (!ownershipLost) {
-        await leaseRepo.release(provider, domain, operation, this.workerId).catch(() => {});
-        this.logger.debug('CentralScheduler', 'Released lease for store', loggerCtx);
+        if (hasUncooperativeJob) {
+          // ACH-02 Containment: An uncooperative job is still pending in the event loop.
+          // Releasing the lease immediately would allow another worker to acquire it and collide
+          // with the still-running uncooperative task. Instead, we let the lease expire naturally via TTL fence.
+          this.logger.warn('CentralScheduler', 'Uncooperative job timed out; withholding immediate lease release to let TTL act as safety fence', loggerCtx);
+        } else {
+          await leaseRepo.release(provider, domain, operation, this.workerId).catch(() => {});
+          this.logger.debug('CentralScheduler', 'Released lease for store', loggerCtx);
+        }
       }
     }
   }
@@ -342,12 +365,24 @@ export class CentralMultiStoreScheduler {
     return elapsedSeconds >= policy.interval_seconds;
   }
 
+  /**
+   * ACH-02: Robust execution with hard timeout, cooperative abort, and containment
+   * of non-cooperative background tasks.
+   * 
+   * Architectural Limitation Note:
+   * In a single-threaded Node.js event loop, an in-flight asynchronous Promise cannot be forcefully
+   * terminated from the outside if it ignores AbortSignal. Containment is enforced by:
+   * 1. Ceasing retries immediately (never spawning a second attempt while attempt 1 is still pending).
+   * 2. Stopping keepalive renewals (preventing indefinite lease extension).
+   * 3. Withholding immediate lease release so the lease TTL acts as an isolation fence.
+   * 4. Invalidation of late mutations via isLost() lease check prior to state advancement.
+   */
   private async executeWithRetry(
     job: IJob,
     state: SyncState | null,
     policy: SyncPolicy,
     isLost: () => boolean
-  ) {
+  ): Promise<JobResult & { uncooperative?: boolean }> {
     let attempts = 0;
     const maxAttempts = 1 + policy.max_retries;
 
@@ -358,7 +393,18 @@ export class CentralMultiStoreScheduler {
       }
 
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), policy.timeout_seconds * 1000);
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      let timedOut = false;
+      let jobSettled = false;
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error(`Operation timed out after ${policy.timeout_seconds}s`));
+        }, policy.timeout_seconds * 1000);
+      });
+      timeoutPromise.catch(() => {}); // Prevent unhandled rejection warning
 
       const jobCtx: JobContext = {
         lastSyncState: state,
@@ -370,8 +416,15 @@ export class CentralMultiStoreScheduler {
       };
 
       try {
-        const result = await job.execute(jobCtx);
-        clearTimeout(timer);
+        const executePromise = job.execute(jobCtx);
+        executePromise.then(
+          () => { jobSettled = true; },
+          () => { jobSettled = true; }
+        );
+
+        // Race between job execution and hard timeout (ACH-02)
+        const result = await Promise.race([executePromise, timeoutPromise]);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
 
         if (result.success || !result.retryable || attempts >= maxAttempts) {
           return result;
@@ -380,9 +433,30 @@ export class CentralMultiStoreScheduler {
         this.logger.warn('CentralScheduler', `Job attempt ${attempts} failed; retrying in ${policy.retry_delay_seconds}s`, {
           error: result.error?.message
         });
-      } catch (err) {
-        clearTimeout(timer);
-        if (attempts >= maxAttempts) {
+      } catch (err: unknown) {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        const isTimeout = timedOut || (err instanceof Error && err.message.includes('timed out'));
+
+        if (isTimeout) {
+          if (!jobSettled) {
+            // Uncooperative job: failed to settle upon AbortSignal.
+            // Halt retries immediately to prevent concurrent execution.
+            this.logger.error('CentralScheduler', `Job timed out after ${policy.timeout_seconds}s and did not terminate upon AbortSignal. Halting retries to prevent concurrent execution.`, {
+              attempts,
+              maxAttempts
+            });
+            return {
+              success: false,
+              retryable: false,
+              uncooperative: true,
+              error: new Error(`Operation timed out after ${policy.timeout_seconds}s (job did not cooperate with AbortSignal)`)
+            };
+          }
+
+          if (attempts >= maxAttempts) {
+            return { success: false, retryable: false, error: err instanceof Error ? err : new Error(String(err)) };
+          }
+        } else if (attempts >= maxAttempts) {
           return { success: false, retryable: false, error: err instanceof Error ? err : new Error(String(err)) };
         }
       }

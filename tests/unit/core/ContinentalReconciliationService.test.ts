@@ -177,4 +177,132 @@ describe('ContinentalReconciliationService Unit Tests (ML-003)', () => {
       );
     });
   });
+
+  describe('Multiple Documents Consolidation & Conflict Precedence (ACH-04 & ACH-05)', () => {
+    it('ACH-05: should consolidate multiple documents for same order and ensure CONFLICT overrides matching evidence', async () => {
+      // Order with 2 join rows: Doc 1 matches, Doc 2 conflicts
+      mockDb.query.mockResolvedValueOnce([
+        {
+          order_id: 'order-multi-1',
+          order_number: 'ZEISS-MULTI-01',
+          status: 'FATURADO',
+          entry_date: '2026-07-01',
+          detail_id: 'detail-1',
+          detail_codcli: '33417', // Matching SAOWEB!
+          fiscal_id: 'fiscal-1',
+          fiscal_cnpj: '48310092000132' // Matching CNPJ!
+        },
+        {
+          order_id: 'order-multi-1',
+          order_number: 'ZEISS-MULTI-01',
+          status: 'FATURADO',
+          entry_date: '2026-07-01',
+          detail_id: 'detail-2',
+          detail_codcli: '99999', // Contradictory SAOWEB from another store!
+          fiscal_id: 'fiscal-2',
+          fiscal_cnpj: '00000000000199' // Contradictory CNPJ!
+        }
+      ]);
+
+      const report = await service.auditHistoricalOrders(continentalCriteria, { dryRun: true });
+
+      // Must be consolidated to exactly 1 order
+      expect(report.totalAudited).toBe(1);
+      expect(report.items).toHaveLength(1);
+      // Favorable evidence CANNOT hide contradictory evidence: CONFLICT must win
+      expect(report.confirmedMatches).toBe(0);
+      expect(report.conflictsCount).toBe(1);
+      expect(report.inconclusiveCandidates).toBe(0);
+      expect(report.items[0].confidence).toBe('CONFLICT');
+      expect(report.items[0].recommendation).toBe('EXCEPTION_CONFLICT');
+      expect(report.items[0].evidence.some(e => e.includes('SAOWEB mismatch'))).toBe(true);
+      expect(report.items[0].evidence.some(e => e.includes('CNPJ mismatch'))).toBe(true);
+    });
+
+    it('ACH-05: should consolidate multiple matching documents into a single CONFIRMED order without duplicate counting', async () => {
+      // Order with 3 join rows from multiple matching details and fiscal documents
+      mockDb.query.mockResolvedValueOnce([
+        {
+          order_id: 'order-multi-2',
+          order_number: 'ZEISS-MULTI-02',
+          status: 'FATURADO',
+          entry_date: '2026-07-02',
+          detail_id: 'detail-1',
+          detail_codcli: '33417',
+          fiscal_id: 'fiscal-1',
+          fiscal_cnpj: '48310092000132'
+        },
+        {
+          order_id: 'order-multi-2',
+          order_number: 'ZEISS-MULTI-02',
+          status: 'FATURADO',
+          entry_date: '2026-07-02',
+          detail_id: 'detail-2',
+          detail_codcli: '33417',
+          fiscal_id: 'fiscal-2',
+          fiscal_cnpj: '48310092000132'
+        }
+      ]);
+
+      const report = await service.auditHistoricalOrders(continentalCriteria, { dryRun: true });
+
+      // Exactly 1 order audited, exactly 1 confirmed
+      expect(report.totalAudited).toBe(1);
+      expect(report.confirmedMatches).toBe(1);
+      expect(report.conflictsCount).toBe(0);
+      expect(report.items).toHaveLength(1);
+      expect(report.items[0].confidence).toBe('CONFIRMED');
+      expect(report.items[0].recommendation).toBe('ATTRIBUTION_ELIGIBLE');
+    });
+
+    it('ACH-04: should classify orders based on relational store_id evidence in order_details and fiscal_documents', async () => {
+      mockDb.query.mockResolvedValueOnce([
+        {
+          order_id: 'order-rel-1',
+          order_number: 'ZEISS-REL-01',
+          status: 'FATURADO',
+          entry_date: '2026-08-01',
+          detail_id: 'det-1',
+          detail_store_id: '3cdde1d2-4461-475f-8faf-418bbb3790fd', // Relational match to Continental!
+          fiscal_id: null,
+          fiscal_store_id: null
+        },
+        {
+          order_id: 'order-rel-2',
+          order_number: 'ZEISS-REL-02',
+          status: 'FATURADO',
+          entry_date: '2026-08-02',
+          detail_id: 'det-2',
+          detail_store_id: 'divergent-store-uuid', // Relational conflict!
+          fiscal_id: null,
+          fiscal_store_id: null
+        },
+        {
+          order_id: 'order-rel-3',
+          order_number: 'ZEISS-REL-03',
+          status: 'FATURADO',
+          entry_date: '2026-08-03',
+          detail_id: 'det-3',
+          detail_store_id: null, // Neutral child with no store_id
+          fiscal_id: null,
+          fiscal_store_id: null
+        }
+      ]);
+
+      const report = await service.auditHistoricalOrders(continentalCriteria, { dryRun: true });
+
+      expect(report.totalAudited).toBe(3);
+      expect(report.confirmedMatches).toBe(1);
+      expect(report.conflictsCount).toBe(1);
+      expect(report.inconclusiveCandidates).toBe(1);
+
+      const item1 = report.items.find(i => i.orderId === 'order-rel-1');
+      const item2 = report.items.find(i => i.orderId === 'order-rel-2');
+      const item3 = report.items.find(i => i.orderId === 'order-rel-3');
+
+      expect(item1?.confidence).toBe('CONFIRMED');
+      expect(item2?.confidence).toBe('CONFLICT');
+      expect(item3?.confidence).toBe('INCONCLUSIVE');
+    });
+  });
 });

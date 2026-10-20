@@ -382,13 +382,25 @@ export class ServingApiServer {
   private async parseJsonBody(req: http.IncomingMessage): Promise<unknown> {
     return new Promise((resolve, reject) => {
       let body = '';
-      req.on('data', chunk => {
+      let rejected = false;
+      const MAX_BYTES = 1024 * 1024; // 1MB limit
+
+      const onData = (chunk: Buffer | string) => {
+        if (rejected) return;
         body += chunk;
-        if (body.length > 1024 * 1024) { // 1MB limit
+        if (body.length > MAX_BYTES) {
+          rejected = true;
+          body = ''; // Free buffer memory immediately
+          req.removeListener('data', onData);
+          req.removeListener('end', onEnd);
+          // Resume and discard stream so connection does not stall
+          req.resume();
           reject(new ApiError(400, 'BAD_REQUEST', 'Request payload too large'));
         }
-      });
-      req.on('end', () => {
+      };
+
+      const onEnd = () => {
+        if (rejected) return;
         if (!body || body.trim() === '') {
           resolve({});
           return;
@@ -398,8 +410,16 @@ export class ServingApiServer {
         } catch {
           reject(new ApiError(400, 'BAD_REQUEST', 'Malformed JSON payload'));
         }
-      });
-      req.on('error', reject);
+      };
+
+      const onError = (err: Error) => {
+        if (rejected) return;
+        reject(err);
+      };
+
+      req.on('data', onData);
+      req.on('end', onEnd);
+      req.on('error', onError);
     });
   }
 }

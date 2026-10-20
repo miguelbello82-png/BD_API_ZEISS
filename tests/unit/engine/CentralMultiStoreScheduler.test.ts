@@ -4,6 +4,8 @@ import { IStoreResolutionService } from '../../../src/core/StoreResolutionServic
 import { IDatabaseExecutor } from '../../../src/config/db';
 import { StoreZeissContext } from '../../../src/contracts/store';
 import { IClock, ISleeper } from '../../../src/utils/Clock';
+import { JobRegistry, IJob, JobContext, JobResult } from '../../../src/engine/JobRegistry';
+import * as StoreCompositionRootModule from '../../../src/engine/StoreCompositionRoot';
 
 describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execution)', () => {
   let mockGlobalPolicyRepo: jest.Mocked<ISyncPolicyRepository>;
@@ -85,7 +87,7 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
     };
 
     mockSleeper = {
-      sleep: jest.fn().mockResolvedValue(undefined),
+      sleep: jest.fn().mockImplementation((ms?: number) => new Promise(resolve => setTimeout(resolve, Math.min(ms || 5, 10)))),
     };
   });
 
@@ -187,5 +189,230 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
     const result = await scheduler.executeStorePolicy(store1Context, sampleCentralPolicy, { force: true });
 
     expect(result).toBe('SKIPPED_LEASE');
+  });
+
+  // -------------------------------------------------------------------------
+  // ACH-01: Checkpoint lido após aquisição do lease
+  // -------------------------------------------------------------------------
+  it('ACH-01: should read authoritative checkpoint AFTER lease acquisition to prevent starting with stale cursor', async () => {
+    const scheduler = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: mockDb,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    let stateReadsCount = 0;
+    mockDb.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('integration.store_sync_leases') && sql.includes('INSERT INTO')) {
+        return [{ acquired: true }];
+      }
+      if (sql.includes('integration.store_sync_leases') && sql.includes('UPDATE')) {
+        return [{ renewed: true }]; // keepalive / stillOwner renewal
+      }
+      if (sql.includes('integration.store_sync_state') && sql.includes('SELECT')) {
+        stateReadsCount++;
+        if (stateReadsCount === 1) {
+          // Pre-lease read: stale cursor
+          return [{
+            provider: 'zeiss',
+            domain: 'orders',
+            operation: 'discovery',
+            last_sync: new Date(1699990000000),
+            cursor_value: JSON.stringify({ lastEndDate: '2026-10-01' })
+          }];
+        }
+        // Post-lease read (ACH-01): fresh cursor updated by concurrent worker
+        return [{
+          provider: 'zeiss',
+          domain: 'orders',
+          operation: 'discovery',
+          last_sync: new Date(1699995000000),
+          cursor_value: JSON.stringify({ lastEndDate: '2026-10-15' })
+        }];
+      }
+      return [];
+    });
+
+    let capturedJobContext: JobContext | undefined;
+    const mockJob: IJob = {
+      execute: jest.fn().mockImplementation(async (ctx: JobContext): Promise<JobResult> => {
+        capturedJobContext = ctx;
+        return { success: true, retryable: false, cursorValue: JSON.stringify({ lastEndDate: '2026-10-20' }) };
+      })
+    };
+
+    const mockRegistry = new JobRegistry();
+    mockRegistry.register('zeiss', 'orders', 'discovery', mockJob);
+
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValue({
+      registry: mockRegistry
+    } as any);
+
+    const result = await scheduler.executeStorePolicy(store1Context, sampleCentralPolicy, { force: true });
+
+    expect(result).toBe('EXECUTED_SUCCESS');
+    expect(stateReadsCount).toBeGreaterThanOrEqual(2);
+    // Verifies the job started with the FRESH post-lease cursor (2026-10-15), NOT the stale pre-lease one (2026-10-01)
+    expect(capturedJobContext?.lastSyncState?.cursor_value).toBe(JSON.stringify({ lastEndDate: '2026-10-15' }));
+  });
+
+  it('ACH-01: should release lease and return SKIPPED_NOT_DUE if post-lease state reveals policy is no longer due', async () => {
+    const scheduler = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: mockDb,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    let leaseReleased = false;
+    let stateReadsCount = 0;
+
+    mockDb.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('integration.store_sync_leases') && sql.includes('INSERT INTO')) {
+        return [{ acquired: true }];
+      }
+      if (sql.includes('DELETE FROM integration.store_sync_leases')) {
+        leaseReleased = true;
+        return [];
+      }
+      if (sql.includes('integration.store_sync_state') && sql.includes('SELECT')) {
+        stateReadsCount++;
+        if (stateReadsCount === 1) {
+          // Pre-lease: last_sync was 400s ago (due)
+          return [{
+            provider: 'zeiss',
+            domain: 'orders',
+            operation: 'discovery',
+            last_sync: new Date(1700000000000 - 400000),
+            cursor_value: 'cursor-1'
+          }];
+        }
+        // Post-lease: another concurrent worker just ran it 10s ago (no longer due!)
+        return [{
+          provider: 'zeiss',
+          domain: 'orders',
+          operation: 'discovery',
+          last_sync: new Date(1700000000000 - 10000),
+          cursor_value: 'cursor-2'
+        }];
+      }
+      return [];
+    });
+
+    const result = await scheduler.executeStorePolicy(store1Context, sampleCentralPolicy, { force: false });
+
+    expect(result).toBe('SKIPPED_NOT_DUE');
+    expect(leaseReleased).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // ACH-02: Timeout e cancelamento de jobs (Cooperative e Uncooperative)
+  // -------------------------------------------------------------------------
+  it('ACH-02: should handle cooperative job timeout by aborting signal, reporting failure and releasing lease', async () => {
+    const policyWithShortTimeout: SyncPolicy = {
+      ...sampleCentralPolicy,
+      timeout_seconds: 1, // 1s timeout
+      max_retries: 0
+    };
+
+    const scheduler = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: mockDb,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    let leaseReleased = false;
+    mockDb.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('integration.store_sync_leases') && sql.includes('INSERT INTO')) {
+        return [{ acquired: true }];
+      }
+      if (sql.includes('integration.store_sync_leases') && sql.includes('UPDATE')) {
+        return [{ renewed: true }];
+      }
+      if (sql.includes('DELETE FROM integration.store_sync_leases')) {
+        leaseReleased = true;
+        return [];
+      }
+      return [];
+    });
+
+    // Cooperative job: listens to abortSignal and throws upon abort
+    const cooperativeJob: IJob = {
+      execute: jest.fn().mockImplementation(async (ctx: JobContext): Promise<JobResult> => {
+        return new Promise((resolve, reject) => {
+          ctx.abortSignal.addEventListener('abort', () => {
+            reject(new Error('Job aborted cleanly'));
+          });
+        });
+      })
+    };
+
+    const mockRegistry = new JobRegistry();
+    mockRegistry.register('zeiss', 'orders', 'discovery', cooperativeJob);
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValue({
+      registry: mockRegistry
+    } as any);
+
+    const result = await scheduler.executeStorePolicy(store1Context, policyWithShortTimeout, { force: true });
+
+    expect(result).toBe('EXECUTED_FAILED');
+    expect(leaseReleased).toBe(true);
+  });
+
+  it('ACH-02: should contain uncooperative job on timeout: disarm keepalive, halt retries without concurrent spawn, and withhold immediate lease release', async () => {
+    const policyWithRetries: SyncPolicy = {
+      ...sampleCentralPolicy,
+      timeout_seconds: 1,
+      max_retries: 3, // multiple retries configured!
+      retry_delay_seconds: 1
+    };
+
+    const scheduler = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: mockDb,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    let leaseReleasedImmediately = false;
+    mockDb.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('integration.store_sync_leases') && sql.includes('INSERT INTO')) {
+        return [{ acquired: true }];
+      }
+      if (sql.includes('DELETE FROM integration.store_sync_leases')) {
+        leaseReleasedImmediately = true;
+        return [];
+      }
+      return [];
+    });
+
+    let executionAttempts = 0;
+    // Uncooperative job: completely ignores abortSignal and its promise never settles
+    const uncooperativeJob: IJob = {
+      execute: jest.fn().mockImplementation(async (): Promise<JobResult> => {
+        executionAttempts++;
+        return new Promise(() => {}); // never resolves or rejects
+      })
+    };
+
+    const mockRegistry = new JobRegistry();
+    mockRegistry.register('zeiss', 'orders', 'discovery', uncooperativeJob);
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValue({
+      registry: mockRegistry
+    } as any);
+
+    const result = await scheduler.executeStorePolicy(store1Context, policyWithRetries, { force: true });
+
+    expect(result).toBe('EXECUTED_FAILED');
+    // Crucial containment: despite max_retries = 3, only 1 attempt was launched because attempt 1 is still pending in event loop!
+    expect(executionAttempts).toBe(1);
+    // Immediate lease release is withheld so the lease TTL acts as an isolation fence against external collision
+    expect(leaseReleasedImmediately).toBe(false);
   });
 });

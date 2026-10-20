@@ -572,6 +572,52 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     delete process.env.ALLOW_EXTERNAL_MUTATIONS;
   });
 
+  it('POST with payload exceeding 1MB should be rejected immediately with 400 and cease buffering (ACH-03)', async () => {
+    mockDb.query.mockResolvedValueOnce([consumerStore1]); // Auth
+
+    // Create a 1.28MB payload sent in multiple chunks (20 x 64KB)
+    const chunkSize = 64 * 1024;
+    const totalChunks = 20;
+    const chunkData = 'x'.repeat(chunkSize);
+
+    const url = new URL('/api/v1/stores/store-uuid-1/vouchers/generate', baseUrl);
+    const res = await new Promise<{ statusCode: number; body: any }>((resolve, reject) => {
+      const req = http.request(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${validToken}`,
+            'Idempotency-Key': 'idemp-too-large',
+          },
+        },
+        (httpRes) => {
+          let data = '';
+          httpRes.on('data', (c) => (data += c));
+          httpRes.on('end', () => {
+            resolve({
+              statusCode: httpRes.statusCode || 0,
+              body: data ? JSON.parse(data) : null,
+            });
+          });
+        }
+      );
+      req.on('error', reject);
+
+      // Write chunks progressively
+      for (let i = 0; i < totalChunks; i++) {
+        req.write(chunkData);
+      }
+      req.end();
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('BAD_REQUEST');
+    expect(res.body.error.message).toBe('Request payload too large');
+  });
+
   // ----------------------------------------------------------
   // 7. Products & Services Domain
   // ----------------------------------------------------------
