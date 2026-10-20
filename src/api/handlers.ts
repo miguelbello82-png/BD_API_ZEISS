@@ -149,14 +149,18 @@ export class ApiHandlers {
    */
   async getTrackingByNf(storeId: string, nfNumber: string) {
     const query = `
-      SELECT 
-        t.id, t.order_id, o.order_number, t.nf_number, t.status, t.event_date,
-        t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega,
-        t.created_at
-      FROM zeiss.tracking_events t
-      JOIN zeiss.orders o ON o.id = t.order_id
-      WHERE o.store_id = $1 AND t.nf_number = $2
-      ORDER BY t.event_date DESC NULLS LAST, t.created_at DESC
+      WITH distinct_events AS (
+        SELECT DISTINCT ON (t.nf_number, t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega)
+          t.id, t.order_id, o.order_number, t.nf_number, t.status, t.event_date,
+          t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega,
+          t.created_at
+        FROM zeiss.tracking_events t
+        JOIN zeiss.orders o ON o.id = t.order_id
+        WHERE o.store_id = $1 AND t.nf_number = $2
+        ORDER BY t.nf_number, t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega, t.created_at DESC
+      )
+      SELECT * FROM distinct_events
+      ORDER BY event_date DESC NULLS LAST, created_at DESC
     `;
 
     const rows = await this.db.query(query, [storeId, nfNumber]);
@@ -178,14 +182,18 @@ export class ApiHandlers {
    */
   async getTrackingByOrder(storeId: string, orderNumber: string) {
     const query = `
-      SELECT 
-        t.id, t.order_id, o.order_number, t.nf_number, t.status, t.event_date,
-        t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega,
-        t.created_at
-      FROM zeiss.tracking_events t
-      JOIN zeiss.orders o ON o.id = t.order_id
-      WHERE o.store_id = $1 AND o.order_number = $2
-      ORDER BY t.event_date DESC NULLS LAST, t.created_at DESC
+      WITH distinct_events AS (
+        SELECT DISTINCT ON (t.nf_number, t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega)
+          t.id, t.order_id, o.order_number, t.nf_number, t.status, t.event_date,
+          t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega,
+          t.created_at
+        FROM zeiss.tracking_events t
+        JOIN zeiss.orders o ON o.id = t.order_id
+        WHERE o.store_id = $1 AND o.order_number = $2
+        ORDER BY t.nf_number, t.status_aprovada, t.status_inicio, t.status_chegada, t.status_entrega, t.data_entrega, t.created_at DESC
+      )
+      SELECT * FROM distinct_events
+      ORDER BY event_date DESC NULLS LAST, created_at DESC
     `;
 
     const rows = await this.db.query(query, [storeId, orderNumber]);
