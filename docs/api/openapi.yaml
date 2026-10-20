@@ -18,10 +18,10 @@ info:
     - `[STATUS: PLANEJADO]`: Contrato desenhado no roadmap da plataforma; retorno HTTP 501 Not Implemented.
 
 servers:
+  - url: https://bdapizeissapi-production.up.railway.app/api/v1
+    description: Servidor de Produção Oficial (Railway BD_API_ZEISS_API)
   - url: http://localhost:3000/api/v1
     description: Servidor Local de Desenvolvimento e Testes
-  - url: https://api.zeiss-platform.internal/api/v1
-    description: Gateway Interno de Produção (Railway)
 
 paths:
   /health:
