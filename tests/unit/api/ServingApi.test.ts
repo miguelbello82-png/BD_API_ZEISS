@@ -717,4 +717,154 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
       expect.stringContaining('store_id IS NULL')
     );
   });
+
+  // ----------------------------------------------------------
+  // 10. Vouchers & Leads Lifecycle
+  // ----------------------------------------------------------
+
+  it('GET /api/v1/stores/:store_id/campaigns/:campaign_id/leads returns paginated leads with email_hmac', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([{ count: '1' }]) // count
+      .mockResolvedValueOnce([
+        {
+          id: 'lead-1',
+          campaign_id: '171',
+          voucher_code: 'VOUCHER-TEST-001',
+          status: 'Ativo',
+          email_hmac: 'a1b2c3d4e5f6g7h8',
+          updated_at: '2026-10-20T12:00:00Z',
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/campaigns/171/leads', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.leads).toHaveLength(1);
+    expect(res.body.data.leads[0].voucher_code).toBe('VOUCHER-TEST-001');
+    expect(res.body.data.leads[0].email_hmac).toBe('a1b2c3d4e5f6g7h8');
+  });
+
+  it('GET /api/v1/stores/:store_id/vouchers/:code returns voucher from database', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'vch-1',
+          voucher_code: 'VOUCHER-TEST-001',
+          campaign_id: '171',
+          lead_id: 'lead-1',
+          status: 'Ativo',
+          created_at: '2026-10-20T12:00:00Z',
+          updated_at: '2026-10-20T12:00:00Z',
+        },
+      ]); // Vouchers query
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/vouchers/VOUCHER-TEST-001', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.voucher_code).toBe('VOUCHER-TEST-001');
+    expect(res.body.data.status).toBe('Ativo');
+  });
+
+  it('GET /api/v1/stores/:store_id/vouchers/:code returns 404 when voucher does not exist', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([]) // zeiss.vouchers local
+      .mockResolvedValueOnce([]); // zeiss.leads campaign lookup
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/vouchers/NONEXISTENT-CODE', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+  });
+
+  it('POST /api/v1/stores/:store_id/vouchers/generate rejects 403 when consumer lacks vouchers:write scope', async () => {
+    mockDb.query.mockResolvedValueOnce([restrictedConsumer]); // only orders:read
+
+    const res = await makeRequest('POST', '/api/v1/stores/store-uuid-1/vouchers/generate', {
+      Authorization: `Bearer ${validToken}`,
+      'Idempotency-Key': 'idem-vch-001',
+    }, {
+      campaignId: '171',
+      name: 'Cliente Teste',
+      email: 'cliente@teste.com'
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error.code).toBe('INSUFFICIENT_SCOPE');
+  });
+
+  it('POST /api/v1/stores/:store_id/vouchers/generate rejects 400 when Idempotency-Key is missing', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth (has vouchers:write)
+      .mockResolvedValueOnce([]); // last_used_at
+
+    const res = await makeRequest('POST', '/api/v1/stores/store-uuid-1/vouchers/generate', {
+      Authorization: `Bearer ${validToken}`,
+    }, {
+      campaignId: '171',
+      name: 'Cliente Teste',
+      email: 'cliente@teste.com'
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error.code).toBe('MISSING_IDEMPOTENCY_KEY');
+  });
+
+  it('POST /api/v1/stores/:store_id/vouchers/generate rejects 403 MUTATION_DISABLED when ALLOW_EXTERNAL_MUTATIONS=false', async () => {
+    const originalEnv = process.env.ALLOW_EXTERNAL_MUTATIONS;
+    process.env.ALLOW_EXTERNAL_MUTATIONS = 'false';
+
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]); // last_used_at
+
+    const res = await makeRequest('POST', '/api/v1/stores/store-uuid-1/vouchers/generate', {
+      Authorization: `Bearer ${validToken}`,
+      'Idempotency-Key': 'idem-vch-002',
+    }, {
+      campaignId: '171',
+      name: 'Cliente Teste',
+      email: 'cliente@teste.com'
+    });
+
+    process.env.ALLOW_EXTERNAL_MUTATIONS = originalEnv;
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error.code).toBe('MUTATION_DISABLED');
+  });
+
+  it('POST /api/v1/stores/:store_id/vouchers/activate rejects 403 MUTATION_DISABLED when ALLOW_EXTERNAL_MUTATIONS=false', async () => {
+    const originalEnv = process.env.ALLOW_EXTERNAL_MUTATIONS;
+    process.env.ALLOW_EXTERNAL_MUTATIONS = 'false';
+
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]); // last_used_at
+
+    const res = await makeRequest('POST', '/api/v1/stores/store-uuid-1/vouchers/activate', {
+      Authorization: `Bearer ${validToken}`,
+      'Idempotency-Key': 'idem-vch-003',
+    }, {
+      campaignId: '171',
+      voucherCode: 'VOUCHER-TEST-001'
+    });
+
+    process.env.ALLOW_EXTERNAL_MUTATIONS = originalEnv;
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error.code).toBe('MUTATION_DISABLED');
+  });
 });
