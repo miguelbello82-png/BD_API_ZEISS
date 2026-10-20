@@ -55,15 +55,15 @@ export class FinancialProvider {
 
     const path = `/prd/financial/receivable/boletourl/${boletoId}/${dueDate}/${storeId}/${finUserId}`;
     if (apiKey) {
-      return await this.client.fetch<Record<string, unknown>[]>(baseUrl, path, { signal: abortSignal, apiKey });
+      return await this.client.fetch<Record<string, unknown>>(baseUrl, path, { signal: abortSignal, apiKey });
     }
-    return await this.client.fetch<Record<string, unknown>[]>(baseUrl, path, { signal: abortSignal });
+    return await this.client.fetch<Record<string, unknown>>(baseUrl, path, { signal: abortSignal });
   }
 
   // FIN-003
   async getDanfe(
     nfNumber: string,
-    nfSeries: string,
+    nfSeries: string = '1',
     contextOverride?: Partial<StoreZeissContext>
   ) {
     const storeId = contextOverride?.zeissStoreCode || this.storeContext?.zeissStoreCode || zeissConfig.storeId;
@@ -71,7 +71,10 @@ export class FinancialProvider {
     const baseUrl = contextOverride?.ordersBaseUrl || this.storeContext?.ordersBaseUrl || zeissConfig.ordersBaseUrl;
     const apiKey = contextOverride?.apiKey || this.storeContext?.apiKey;
 
-    const formattedNf = `${nfNumber}${nfSeries}`.padStart(12, '0');
+    const cleanNf = nfNumber.replace(/^0+/, '');
+    const cleanSeries = (nfSeries || '1').padStart(3, '0');
+    const formattedNf = `${cleanNf}${cleanSeries}`.padStart(12, '0');
+
     const path = `/prd/pedidos/nf/${countryId}/${storeId}/${formattedNf}`;
     if (apiKey) {
       return await this.client.fetch<Record<string, unknown>>(baseUrl, path, { apiKey });

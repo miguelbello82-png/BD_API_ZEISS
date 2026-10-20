@@ -82,8 +82,8 @@ export class VouchersProvider {
     const baseUrl = contextOverride?.campaignsBaseUrl || this.storeContext?.campaignsBaseUrl || zeissConfig.campaignsBaseUrl;
     const apiKey = contextOverride?.apiKey || this.storeContext?.apiKey;
 
-    const path = `/vouchers/gerar`;
-    return await this.client.fetch<Record<string, unknown>[]>(baseUrl, path, {
+    const path = `/prd/campanhas/voucher/generate`;
+    return await this.client.fetch<Record<string, unknown>>(baseUrl, path, {
       method: 'POST',
       body: JSON.stringify(payload),
       apiKey
@@ -100,14 +100,14 @@ export class VouchersProvider {
     const baseUrl = contextOverride?.campaignsBaseUrl || this.storeContext?.campaignsBaseUrl || zeissConfig.campaignsBaseUrl;
     const apiKey = contextOverride?.apiKey || this.storeContext?.apiKey;
 
-    const path = `/vouchers/ativar`;
-    return await this.client.fetch<Record<string, unknown>[]>(baseUrl, path, {
+    const path = `/prd/campanhas/voucher/redeem`;
+    return await this.client.fetch<Record<string, unknown>>(baseUrl, path, {
       method: 'POST',
       body: JSON.stringify({
-        campaignId,
-        voucherCode,
-        userId: voucherUserId,
-        loja: storeId
+        idcampaign: campaignId,
+        vouchercode: voucherCode,
+        iduser: voucherUserId,
+        cnloja: storeId
       }),
       apiKey
     });

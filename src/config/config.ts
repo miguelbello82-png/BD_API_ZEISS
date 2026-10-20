@@ -68,8 +68,8 @@ export const zeissConfig = {
     return id || '';
   },
   get leadsHmacSecret(): string {
-    const secret = process.env.ZEISS_LEADS_HMAC_SECRET;
+    const secret = process.env.ZEISS_LEADS_HMAC_SECRET || process.env.LEADS_HMAC_SECRET || process.env.JWT_SECRET || process.env.ZEISS_API_KEY;
     if (!secret && process.env.NODE_ENV !== 'test') throw new Error('ZEISS configuration missing: ZEISS_LEADS_HMAC_SECRET');
-    return secret || '';
+    return secret || 'bd_api_zeiss_leads_default_hmac_secret';
   }
 };

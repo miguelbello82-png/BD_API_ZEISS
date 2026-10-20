@@ -8,6 +8,9 @@ import { IStoreResolutionService } from '../core/StoreResolutionService';
 import { AuditService } from './audit';
 import { VouchersProvider } from '../providers/vouchers';
 import { FinancialProvider } from '../providers/financial';
+import { PgLeadsRepository } from '../repositories/postgres/LeadsRepository';
+import { LeadMapper } from '../engine/Mappers';
+import { zeissConfig } from '../config/config';
 
 export interface PaginationParams {
   page: number;
@@ -294,11 +297,42 @@ export class ApiHandlers {
 
     const whereClause = conditions.join(' AND ');
 
-    const countRows = await this.db.query<{ count: string }>(
+    let countRows = await this.db.query<{ count: string }>(
       `SELECT COUNT(*) as count FROM zeiss.leads WHERE ${whereClause}`,
       params
     );
-    const total = parseInt(countRows[0]?.count || '0', 10);
+    let total = parseInt(countRows[0]?.count || '0', 10);
+
+    // On-demand hydration if leads not yet synced for this campaign
+    if (total === 0 && this.storeResolutionService) {
+      try {
+        const context = await this.storeResolutionService.resolveStore(storeId);
+        const vouchersProvider = new VouchersProvider(context);
+        const rawLeads = await vouchersProvider.getLeads(campaignId);
+        if (Array.isArray(rawLeads) && rawLeads.length > 0) {
+          const hmacSecret = zeissConfig.leadsHmacSecret;
+          const leadsRepo = new PgLeadsRepository(this.db, storeId);
+          const normalized = rawLeads.map(raw => {
+            try {
+              return LeadMapper.normalize(raw, campaignId, hmacSecret);
+            } catch {
+              return null;
+            }
+          }).filter((l): l is NonNullable<typeof l> => l !== null);
+
+          if (normalized.length > 0) {
+            await leadsRepo.upsertMany(campaignId, normalized, storeId);
+            countRows = await this.db.query<{ count: string }>(
+              `SELECT COUNT(*) as count FROM zeiss.leads WHERE ${whereClause}`,
+              params
+            );
+            total = parseInt(countRows[0]?.count || '0', 10);
+          }
+        }
+      } catch {
+        // Cleanly handle 404 or missing leads from ZEISS
+      }
+    }
 
     const rows = await this.db.query(
       `SELECT 
@@ -328,13 +362,31 @@ export class ApiHandlers {
    * Retrieves single lead by voucher code for the store.
    */
   async getLeadByVoucher(storeId: string, voucherCode: string) {
-    const rows = await this.db.query(
+    let rows = await this.db.query(
       `SELECT 
          id, campaign_id, voucher_code, status, email_hmac, created_at, updated_at
        FROM zeiss.leads
        WHERE store_id = $1 AND voucher_code = $2`,
       [storeId, voucherCode]
     );
+
+    if (rows.length === 0 && this.storeResolutionService) {
+      // Check store campaigns to hydrate on-demand
+      const storeCampaigns = await this.db.query<{ campaign_id: string }>(
+        'SELECT campaign_id FROM zeiss.store_campaigns WHERE store_id = $1',
+        [storeId]
+      );
+      for (const sc of storeCampaigns) {
+        await this.listLeads(storeId, sc.campaign_id, {});
+      }
+      rows = await this.db.query(
+        `SELECT 
+           id, campaign_id, voucher_code, status, email_hmac, created_at, updated_at
+         FROM zeiss.leads
+         WHERE store_id = $1 AND voucher_code = $2`,
+        [storeId, voucherCode]
+      );
+    }
 
     if (rows.length === 0) {
       throw new ApiError(404, 'NOT_FOUND', `Lead with voucher code '${voucherCode}' not found for store '${storeId}'`);
@@ -365,12 +417,62 @@ export class ApiHandlers {
     }
 
     // 2. If campaignId is supplied or found via leads, query live ZEISS VCH-001
-    const campaignId = query?.campaignId || (await this.findCampaignIdForVoucher(storeId, voucherCode));
+    let campaignId = query?.campaignId || (await this.findCampaignIdForVoucher(storeId, voucherCode));
+
+    // If still no campaignId, check active campaigns for this store
+    if (!campaignId && this.storeResolutionService) {
+      const activeCampaigns = await this.db.query<{ campaign_id: string }>(
+        'SELECT campaign_id FROM zeiss.store_campaigns WHERE store_id = $1 ORDER BY updated_at DESC',
+        [storeId]
+      );
+      for (const sc of activeCampaigns) {
+        try {
+          const context = await this.storeResolutionService.resolveStore(storeId);
+          const vouchersProvider = new VouchersProvider(context);
+          const liveDetail = await vouchersProvider.getVoucherDetail(sc.campaign_id, voucherCode);
+          if (liveDetail) {
+            campaignId = sc.campaign_id;
+            await this.db.query(
+              `INSERT INTO zeiss.vouchers (voucher_code, campaign_id, status, store_id, updated_at)
+               VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+               ON CONFLICT (voucher_code) DO UPDATE SET
+                 status = EXCLUDED.status,
+                 store_id = COALESCE(zeiss.vouchers.store_id, EXCLUDED.store_id),
+                 updated_at = CURRENT_TIMESTAMP`,
+              [voucherCode, campaignId, (liveDetail as any).status || ((liveDetail as any).utilizadosn === 'S' ? 'Resgatado' : 'Ativo'), storeId]
+            ).catch(() => {});
+
+            return {
+              storeId,
+              voucherCode,
+              campaignId,
+              details: liveDetail,
+              source: 'ZEISS_LIVE'
+            };
+          }
+        } catch {
+          // continue to next campaign
+        }
+      }
+    }
+
     if (campaignId && this.storeResolutionService) {
       try {
         const context = await this.storeResolutionService.resolveStore(storeId);
         const vouchersProvider = new VouchersProvider(context);
         const liveDetail = await vouchersProvider.getVoucherDetail(campaignId, voucherCode);
+
+        // Persist into zeiss.vouchers
+        await this.db.query(
+          `INSERT INTO zeiss.vouchers (voucher_code, campaign_id, status, store_id, updated_at)
+           VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+           ON CONFLICT (voucher_code) DO UPDATE SET
+             status = EXCLUDED.status,
+             store_id = COALESCE(zeiss.vouchers.store_id, EXCLUDED.store_id),
+             updated_at = CURRENT_TIMESTAMP`,
+          [voucherCode, campaignId, (liveDetail as any).status || ((liveDetail as any).utilizadosn === 'S' ? 'Resgatado' : 'Ativo'), storeId]
+        ).catch(() => {});
+
         return {
           storeId,
           voucherCode,
@@ -747,7 +849,9 @@ export class ApiHandlers {
     // If dueDate not provided in query, look up in receivables
     if (!dueDate) {
       const rec = await this.db.query<{ due_date: string }>(
-        'SELECT due_date FROM zeiss.receivables WHERE store_id = $1 AND boleto_number = $2',
+        `SELECT due_date FROM zeiss.receivables 
+         WHERE store_id = $1 AND (boleto_number = $2 OR fiscal_reference = $2 OR id::text = $2)
+         LIMIT 1`,
         [storeId, boletoId]
       );
       if (rec.length > 0 && rec[0].due_date) {

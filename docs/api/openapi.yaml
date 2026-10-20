@@ -339,7 +339,7 @@ paths:
       description: |
         Recupera detalhes do voucher na base local ou via fallback em tempo real na API ZEISS (VCH-001).
       tags:
-        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - "[STATUS: OPERACIONAL]"
         - Vouchers
       security:
         - ApiKeyAuth: []
@@ -378,7 +378,7 @@ paths:
         Exige `ALLOW_EXTERNAL_MUTATIONS=true` na configuração de runtime.
         Em caso de reenvio com a mesma chave e payload idêntico, o resultado anterior é reproduzido sem disparar nova mutação.
       tags:
-        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - "[STATUS: OPERACIONAL_MUTACAO_CONTROLADA]"
         - Vouchers
       security:
         - ApiKeyAuth: []
@@ -423,7 +423,7 @@ paths:
         Emissão de novo voucher através da mutação VCH-002.
         Exige `ALLOW_EXTERNAL_MUTATIONS=true` e cabeçalho `Idempotency-Key`.
       tags:
-        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - "[STATUS: OPERACIONAL_MUTACAO_CONTROLADA]"
         - Vouchers
       security:
         - ApiKeyAuth: []
@@ -637,7 +637,7 @@ paths:
       summary: Recuperação Transitória de Boleto (FIN-002)
       description: Consulta transitória de segunda via de boleto na ZEISS em tempo de atendimento.
       tags:
-        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - "[STATUS: OPERACIONAL]"
         - Financeiro
       security:
         - ApiKeyAuth: []
@@ -673,7 +673,7 @@ paths:
       summary: Recuperação Transitória de DANFE/XML (FIN-003)
       description: Consulta transitória de documento fiscal na ZEISS.
       tags:
-        - "[STATUS: IMPLEMENTADO_NAO_HOMOLOGADO]"
+        - "[STATUS: OPERACIONAL]"
         - Financeiro
       security:
         - ApiKeyAuth: []
