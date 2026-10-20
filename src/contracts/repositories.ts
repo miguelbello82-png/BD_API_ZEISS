@@ -68,8 +68,8 @@ export interface ISyncStateRepository {
   /** Read the current sync state for an operation. */
   findByKey(provider: string, domain: string, operation: string): Promise<SyncState | null>;
 
-  /** Create or update the sync state after a successful run. */
-  upsert(state: SyncState): Promise<void>;
+  /** Create or update the sync state after a successful run, optionally fenced by active lease token. */
+  upsert(state: SyncState, leaseToken?: string): Promise<void>;
 }
 
 // ----- Sync Lease Repository -----

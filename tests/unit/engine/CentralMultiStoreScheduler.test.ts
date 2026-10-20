@@ -6,6 +6,8 @@ import { StoreZeissContext } from '../../../src/contracts/store';
 import { IClock, ISleeper } from '../../../src/utils/Clock';
 import { JobRegistry, IJob, JobContext, JobResult } from '../../../src/engine/JobRegistry';
 import * as StoreCompositionRootModule from '../../../src/engine/StoreCompositionRoot';
+import { FencedDatabaseExecutor, StaleWriteError } from '../../../src/engine/FencedDatabaseExecutor';
+import { PgStoreSyncStateRepository } from '../../../src/repositories/postgres/StoreSyncStateRepository';
 
 describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execution)', () => {
   let mockGlobalPolicyRepo: jest.Mocked<ISyncPolicyRepository>;
@@ -414,5 +416,250 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
     expect(executionAttempts).toBe(1);
     // Immediate lease release is withheld so the lease TTL acts as an isolation fence against external collision
     expect(leaseReleasedImmediately).toBe(false);
+  });
+
+  it('ACH-02: should prevent stale writes when uncooperative Job A attempts to persist after lease expiration and acquisition by Instance B', async () => {
+    // Shared simulated database state
+    let activeLease: {
+      store_id: string;
+      provider: string;
+      domain: string;
+      operation: string;
+      owner_token: string;
+      expires_at: number; // timestamp ms
+    } | null = null;
+
+    let currentState: {
+      cursor_value: string | null;
+      last_sync: Date | null;
+    } = { cursor_value: null, last_sync: null };
+
+    const ordersTable: Array<{ order_number: string; store_id: string; payload: string }> = [];
+
+    // Factory to create DB executor for simulated Postgres
+    const createSimulatedDb = () => {
+      const db: IDatabaseExecutor = {
+        query: jest.fn().mockImplementation(async (sql: string, params?: any[]) => {
+          // store_sync_state atomic upsert with fencing
+          if (sql.includes('integration.store_sync_state') && sql.includes('INSERT INTO')) {
+            const [storeId, provider, domain, operation, lastSync, cursorValue, leaseToken] = params || [];
+            // Fencing check: does caller leaseToken match activeLease.owner_token?
+            if (activeLease && activeLease.owner_token === leaseToken && activeLease.expires_at >= Date.now()) {
+              currentState = { cursor_value: cursorValue, last_sync: lastSync };
+              return [{ store_id: storeId }];
+            }
+            // Mismatch or expired: 0 rows returned
+            return [];
+          }
+
+          // store_sync_leases tryAcquire
+          if (sql.includes('integration.store_sync_leases') && sql.includes('INSERT INTO')) {
+            const [storeId, provider, domain, operation, ownerToken, ttlSeconds] = params || [];
+            const now = Date.now();
+            if (!activeLease || activeLease.expires_at < now) {
+              activeLease = {
+                store_id: storeId,
+                provider,
+                domain,
+                operation,
+                owner_token: ownerToken,
+                expires_at: now + ttlSeconds * 1000
+              };
+              return [{ acquired: true }];
+            }
+            return []; // lease held by someone else and not expired
+          }
+
+          // store_sync_leases FOR UPDATE / findActive
+          if (sql.includes('FROM integration.store_sync_leases') && sql.includes('SELECT') && !sql.includes('integration.store_sync_state')) {
+            if (activeLease && activeLease.expires_at >= Date.now()) {
+              return [{
+                store_id: activeLease.store_id,
+                provider: activeLease.provider,
+                domain: activeLease.domain,
+                operation: activeLease.operation,
+                owner_token: activeLease.owner_token,
+                expires_at: new Date(activeLease.expires_at)
+              }];
+            }
+            return [];
+          }
+
+          // store_sync_leases renew
+          if (sql.includes('integration.store_sync_leases') && sql.includes('UPDATE')) {
+            const [storeId, provider, domain, operation, ownerToken, ttlSeconds] = params || [];
+            if (activeLease && activeLease.owner_token === ownerToken && activeLease.expires_at >= Date.now()) {
+              activeLease.expires_at = Date.now() + ttlSeconds * 1000;
+              return [{ renewed: true }];
+            }
+            return [];
+          }
+
+          // store_sync_leases release
+          if (sql.includes('DELETE FROM integration.store_sync_leases')) {
+            const [storeId, provider, domain, operation, ownerToken] = params || [];
+            if (activeLease && activeLease.owner_token === ownerToken) {
+              activeLease = null;
+            }
+            return [];
+          }
+
+          // store_sync_state SELECT
+          if (sql.includes('integration.store_sync_state') && sql.includes('SELECT')) {
+            return [{
+              provider: 'zeiss',
+              domain: 'orders',
+              operation: 'discovery',
+              last_sync: currentState.last_sync,
+              cursor_value: currentState.cursor_value
+            }];
+          }
+
+          // zeiss.orders INSERT
+          if (sql.includes('zeiss.orders') && sql.includes('INSERT')) {
+            const [orderNumber, osNumber, status, codsit, entryDate, expectedDate, storeId] = params || [];
+            ordersTable.push({ order_number: orderNumber, store_id: storeId, payload: status });
+            return [];
+          }
+
+          return [];
+        }),
+        transaction: jest.fn().mockImplementation(async (cb: (client: IDatabaseExecutor) => Promise<any>) => {
+          return cb(db);
+        })
+      };
+      return db;
+    };
+
+    const dbA = createSimulatedDb();
+    const dbB = createSimulatedDb();
+
+    // 1. Instância A
+    const schedulerA = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: dbA,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    // 2. Instância B
+    const schedulerB = new CentralMultiStoreScheduler({
+      globalPolicyRepo: mockGlobalPolicyRepo,
+      storeResolutionService: mockStoreResolutionService,
+      db: dbB,
+      clock: mockClock,
+      sleeper: mockSleeper,
+    });
+
+    const shortPolicy: SyncPolicy = {
+      ...sampleCentralPolicy,
+      timeout_seconds: 1,
+      lease_ttl_seconds: 30, // 30s lease TTL
+      max_retries: 0
+    };
+
+    // Deferred promise for uncooperative Job A
+    let triggerJobAPersist!: () => Promise<void>;
+    let jobAPersistError: Error | null = null;
+
+    const uncooperativeJobA: IJob = {
+      execute: jest.fn().mockImplementation(async (ctx: JobContext): Promise<JobResult> => {
+        // Expose function for Job A to attempt persistence later, after lease expiry
+        triggerJobAPersist = async () => {
+          try {
+            // Attempt to write orders using FencedDatabaseExecutor bound to Instance A
+            const fencedDbA = new FencedDatabaseExecutor(dbA, {
+              storeId: store1Context.storeId,
+              provider: 'zeiss',
+              domain: 'orders',
+              operation: 'discovery',
+              ownerToken: (schedulerA as any).workerId
+            });
+            await fencedDbA.query('INSERT INTO zeiss.orders (order_number, store_id) VALUES ($1, $2)', [
+              'ORD-STALE-FROM-A',
+              store1Context.storeId
+            ]);
+          } catch (err: any) {
+            jobAPersistError = err;
+            throw err;
+          }
+        };
+
+        // Job A ignores abortSignal and never resolves synchronously
+        return new Promise(() => {});
+      })
+    };
+
+    const normalJobB: IJob = {
+      execute: jest.fn().mockImplementation(async (ctx: JobContext): Promise<JobResult> => {
+        const fencedDbB = new FencedDatabaseExecutor(dbB, {
+          storeId: store1Context.storeId,
+          provider: 'zeiss',
+          domain: 'orders',
+          operation: 'discovery',
+          ownerToken: (schedulerB as any).workerId
+        });
+        await fencedDbB.query('INSERT INTO zeiss.orders (order_number, store_id) VALUES ($1, $2)', [
+          'ORD-FRESH-FROM-B',
+          store1Context.storeId
+        ]);
+        return {
+          success: true,
+          retryable: false,
+          cursorValue: JSON.stringify({ lastEndDate: '2026-10-20' })
+        };
+      })
+    };
+
+    // Step 1: Instância A adquire lease e inicia job uncooperative
+    const mockRegistryA = new JobRegistry();
+    mockRegistryA.register('zeiss', 'orders', 'discovery', uncooperativeJobA);
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValueOnce({
+      registry: mockRegistryA
+    } as any);
+
+    const resultA = await schedulerA.executeStorePolicy(store1Context, shortPolicy, { force: true });
+    expect(resultA).toBe('EXECUTED_FAILED');
+    expect((activeLease as any)?.owner_token).toBe((schedulerA as any).workerId);
+
+    // Step 2: O lease de A expira (simulamos avanço do tempo além de lease_ttl_seconds)
+    (activeLease as any).expires_at = Date.now() - 1000;
+
+    // Step 3: Instância B adquire novo lease
+    const mockRegistryB = new JobRegistry();
+    mockRegistryB.register('zeiss', 'orders', 'discovery', normalJobB);
+    jest.spyOn(StoreCompositionRootModule, 'buildStoreCompositionRoot').mockReturnValueOnce({
+      registry: mockRegistryB
+    } as any);
+
+    const resultB = await schedulerB.executeStorePolicy(store1Context, shortPolicy, { force: true });
+    expect(resultB).toBe('EXECUTED_SUCCESS');
+    expect(currentState.cursor_value).toBe(JSON.stringify({ lastEndDate: '2026-10-20' }));
+    expect(ordersTable.some(o => o.order_number === 'ORD-FRESH-FROM-B')).toBe(true);
+
+    // Step 4: Instância A (job órfão) tenta persistir dados após perder sua autorização
+    await expect(triggerJobAPersist()).rejects.toThrow(StaleWriteError);
+    expect(jobAPersistError).toBeInstanceOf(StaleWriteError);
+
+    // Step 5: Verifica que a escrita obsoleta de A NUNCA entrou na tabela de pedidos
+    expect(ordersTable.some(o => o.order_number === 'ORD-STALE-FROM-A')).toBe(false);
+
+    // Step 6: Instância A também tenta avançar o cursor via stateRepo.upsert com token obsoleto
+    const stateRepoA = new PgStoreSyncStateRepository(dbA, store1Context.storeId);
+    await expect(
+      stateRepoA.upsert({
+        provider: 'zeiss',
+        domain: 'orders',
+        operation: 'discovery',
+        last_sync: new Date(),
+        cursor_value: JSON.stringify({ lastEndDate: '2026-01-01' }) // Stale regressed cursor!
+      }, (schedulerA as any).workerId)
+    ).rejects.toThrow(/STALE_WRITE_REJECTED/);
+
+    // Step 7: B continua corretamente com seu cursor e dados intactos, sem corrupção ou regressão
+    expect(currentState.cursor_value).toBe(JSON.stringify({ lastEndDate: '2026-10-20' }));
+    expect(ordersTable.length).toBe(1);
+    expect(ordersTable[0].order_number).toBe('ORD-FRESH-FROM-B');
   });
 });

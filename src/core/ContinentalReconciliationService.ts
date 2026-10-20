@@ -90,8 +90,11 @@ export class ContinentalReconciliationService {
   /**
    * Audits historical unassigned records (store_id IS NULL) against store criteria.
    * Default mode is dryRun=true (simulation and reporting only).
-   * 
-   * ACH-04: Queries real database columns without artificial NULL::text constructs.
+   *
+   * ACH-04: Enforces strict separation between automatic reconciliation by independent commercial
+   * evidence (SAOWEB / CNPJ) and internal operational metadata. Operational store_id on child records
+   * does NOT constitute independent proof (avoids circular confirmation). Orders without independent
+   * commercial proof remain strictly INCONCLUSIVE (QUARANTINE_LEGACY).
    * ACH-05: Consolidates multiple documents per order, enforcing conflict precedence
    * so favorable evidence cannot hide contradictory evidence.
    */
@@ -171,56 +174,59 @@ export class ContinentalReconciliationService {
     for (const bucket of orderBuckets.values()) {
       const evidence: string[] = [];
       let hasConflict = false;
-      let hasMatch = false;
+      let hasIndependentMatch = false;
+      let hasOperationalContext = false;
 
       // 1. Conflict Evaluation (Precedence 1 - HIGHEST)
       // Any contradictory evidence across any child document immediately flags CONFLICT
       for (const d of bucket.details) {
         if (d.storeId && d.storeId !== criteria.targetStoreId) {
           hasConflict = true;
-          evidence.push(`Detail item belongs to divergent store: '${d.storeId}' (expected '${criteria.targetStoreId}')`);
+          evidence.push(`Detail item marked with divergent storeId ('${d.storeId}', expected '${criteria.targetStoreId}'). Operational conflict.`);
         }
         if (d.codcli && d.codcli !== criteria.saowebCode) {
           hasConflict = true;
-          evidence.push(`SAOWEB mismatch in detail: expected '${criteria.saowebCode}', found '${d.codcli}'`);
+          evidence.push(`Independent SAOWEB mismatch in detail: expected '${criteria.saowebCode}', found '${d.codcli}'.`);
         }
       }
 
       for (const f of bucket.fiscalDocs) {
         if (f.storeId && f.storeId !== criteria.targetStoreId) {
           hasConflict = true;
-          evidence.push(`Fiscal document NF ${f.nfNumber || f.id} belongs to divergent store: '${f.storeId}' (expected '${criteria.targetStoreId}')`);
+          evidence.push(`Fiscal doc NF ${f.nfNumber || f.id} marked with divergent storeId ('${f.storeId}', expected '${criteria.targetStoreId}'). Operational conflict.`);
         }
         if (f.cnpj && f.cnpj !== cleanCnpj) {
           hasConflict = true;
-          evidence.push(`CNPJ mismatch in fiscal doc NF ${f.nfNumber || f.id}: expected '${cleanCnpj}', found '${f.cnpj}'`);
+          evidence.push(`Independent CNPJ mismatch in fiscal doc NF ${f.nfNumber || f.id}: expected '${cleanCnpj}', found '${f.cnpj}'.`);
         }
       }
 
       // 2. Match Evaluation (Precedence 2)
+      // ACH-04: Only INDEPENDENT commercial evidence (external SAOWEB / CNPJ) can confirm an order.
+      // Internal operational store_id on child records is circular and CANNOT confirm an unassigned order.
       for (const d of bucket.details) {
-        if (d.storeId === criteria.targetStoreId) {
-          hasMatch = true;
-          evidence.push(`Detail item confirmed linked to store '${criteria.storeCode}' (${criteria.targetStoreId})`);
-        }
         if (d.codcli && d.codcli === criteria.saowebCode) {
-          hasMatch = true;
-          evidence.push(`SAOWEB confirmed match in detail: '${criteria.saowebCode}'`);
+          hasIndependentMatch = true;
+          evidence.push(`Independent commercial evidence match: SAOWEB code '${criteria.saowebCode}' confirmed in detail record.`);
+        }
+        if (d.storeId === criteria.targetStoreId) {
+          hasOperationalContext = true;
+          evidence.push(`Detail record contains internal operational store_id ('${criteria.targetStoreId}'); operational metadata does not constitute independent commercial proof.`);
         }
       }
 
       for (const f of bucket.fiscalDocs) {
-        if (f.storeId === criteria.targetStoreId) {
-          hasMatch = true;
-          evidence.push(`Fiscal document NF ${f.nfNumber || f.id} confirmed linked to store '${criteria.storeCode}' (${criteria.targetStoreId})`);
-        }
         if (f.cnpj && f.cnpj === cleanCnpj) {
-          hasMatch = true;
-          evidence.push(`Fiscal document CNPJ confirmed match: '${cleanCnpj}'`);
+          hasIndependentMatch = true;
+          evidence.push(`Independent commercial evidence match: CNPJ '${cleanCnpj}' confirmed in fiscal document.`);
+        }
+        if (f.storeId === criteria.targetStoreId) {
+          hasOperationalContext = true;
+          evidence.push(`Fiscal doc NF ${f.nfNumber || f.id} contains internal operational store_id ('${criteria.targetStoreId}'); operational metadata does not constitute independent commercial proof.`);
         }
       }
 
-      // 3. Final Consolidated Classification (ACH-05)
+      // 3. Final Consolidated Classification (ACH-04 & ACH-05)
       let confidence: MatchConfidence;
       let recommendation: Recommendation;
 
@@ -229,19 +235,21 @@ export class ContinentalReconciliationService {
         confidence = 'CONFLICT';
         recommendation = 'EXCEPTION_CONFLICT';
         conflictsCount++;
-      } else if (hasMatch) {
+      } else if (hasIndependentMatch) {
         confidence = 'CONFIRMED';
         recommendation = 'ATTRIBUTION_ELIGIBLE';
         confirmedMatches++;
       } else {
-        // Inconclusive: neither commercial nor relational markers found
+        // Inconclusive: orders without independent commercial evidence must remain in quarantine
         confidence = 'INCONCLUSIVE';
         recommendation = 'QUARANTINE_LEGACY';
         inconclusiveCandidates++;
-        if (bucket.details.length === 0 && bucket.fiscalDocs.length === 0) {
-          evidence.push('No linked details or fiscal documents found for this order');
+        if (hasOperationalContext) {
+          evidence.push('Order contains internal operational store_id on child records but lacks independent commercial proof (no external SAOWEB/CNPJ). Operational metadata is circular and cannot trigger automatic confirmation. Quarantined for explicit administrative migration by data owner declaration.');
+        } else if (bucket.details.length === 0 && bucket.fiscalDocs.length === 0) {
+          evidence.push('No linked details or fiscal documents found for this order.');
         } else {
-          evidence.push('No store attribution or commercial markers (SAOWEB/CNPJ) present in relational documents');
+          evidence.push('No independent commercial markers (SAOWEB or CNPJ) present in relational documents.');
         }
       }
 

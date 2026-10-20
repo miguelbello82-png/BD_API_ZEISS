@@ -618,6 +618,54 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     expect(res.body.error.message).toBe('Request payload too large');
   });
 
+  it('ACH-03: POST with multibyte UTF-8 payload exceeding 1MB byte limit should be rejected with 400 even if character count is lower', async () => {
+    mockDb.query.mockResolvedValueOnce([consumerStore1]); // Auth
+
+    // 4-byte UTF-8 emoji '🌟' (4 bytes per character)
+    // 300,000 characters = 1,200,000 bytes (> 1MB = 1,048,576 bytes), but character count is only 300,000 (< 1,000,000)
+    const emoji = '🌟';
+    const totalChars = 300_000;
+    const chunkChars = 30_000; // 30,000 * 4 bytes = 120,000 bytes per chunk
+    const chunkData = emoji.repeat(chunkChars);
+    const totalChunks = totalChars / chunkChars; // 10 chunks
+
+    const url = new URL('/api/v1/stores/store-uuid-1/vouchers/generate', baseUrl);
+    const res = await new Promise<{ statusCode: number; body: any }>((resolve, reject) => {
+      const req = http.request(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            Authorization: `Bearer ${validToken}`,
+            'Idempotency-Key': 'idemp-multibyte-too-large',
+          },
+        },
+        (httpRes) => {
+          let data = '';
+          httpRes.on('data', (c) => (data += c));
+          httpRes.on('end', () => {
+            resolve({
+              statusCode: httpRes.statusCode || 0,
+              body: data ? JSON.parse(data) : null,
+            });
+          });
+        }
+      );
+      req.on('error', reject);
+
+      for (let i = 0; i < totalChunks; i++) {
+        req.write(chunkData);
+      }
+      req.end();
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('BAD_REQUEST');
+    expect(res.body.error.message).toBe('Request payload too large');
+  });
+
   // ----------------------------------------------------------
   // 7. Products & Services Domain
   // ----------------------------------------------------------

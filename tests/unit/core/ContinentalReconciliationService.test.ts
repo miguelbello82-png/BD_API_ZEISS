@@ -255,54 +255,85 @@ describe('ContinentalReconciliationService Unit Tests (ML-003)', () => {
       expect(report.items[0].recommendation).toBe('ATTRIBUTION_ELIGIBLE');
     });
 
-    it('ACH-04: should classify orders based on relational store_id evidence in order_details and fiscal_documents', async () => {
+    it('ACH-04: should NOT confirm orders based solely on operational child store_id (circular evidence), keeping them INCONCLUSIVE for administrative migration', async () => {
       mockDb.query.mockResolvedValueOnce([
         {
-          order_id: 'order-rel-1',
-          order_number: 'ZEISS-REL-01',
+          order_id: 'order-op-1',
+          order_number: 'ZEISS-OP-01',
           status: 'FATURADO',
           entry_date: '2026-08-01',
           detail_id: 'det-1',
-          detail_store_id: '3cdde1d2-4461-475f-8faf-418bbb3790fd', // Relational match to Continental!
+          detail_store_id: '3cdde1d2-4461-475f-8faf-418bbb3790fd', // Child has Continental store_id set by worker
+          detail_codcli: null, // NO independent commercial proof
           fiscal_id: null,
-          fiscal_store_id: null
+          fiscal_store_id: null,
+          fiscal_cnpj: null
         },
         {
-          order_id: 'order-rel-2',
-          order_number: 'ZEISS-REL-02',
+          order_id: 'order-indep-1',
+          order_number: 'ZEISS-INDEP-01',
           status: 'FATURADO',
           entry_date: '2026-08-02',
           detail_id: 'det-2',
-          detail_store_id: 'divergent-store-uuid', // Relational conflict!
+          detail_store_id: null,
+          detail_codcli: '33417', // Genuine independent commercial SAOWEB match!
           fiscal_id: null,
-          fiscal_store_id: null
+          fiscal_store_id: null,
+          fiscal_cnpj: null
         },
         {
-          order_id: 'order-rel-3',
-          order_number: 'ZEISS-REL-03',
+          order_id: 'order-conflict-1',
+          order_number: 'ZEISS-CONF-01',
           status: 'FATURADO',
           entry_date: '2026-08-03',
           detail_id: 'det-3',
-          detail_store_id: null, // Neutral child with no store_id
+          detail_store_id: 'divergent-store-uuid', // Operational conflict to another store!
+          detail_codcli: null,
           fiscal_id: null,
-          fiscal_store_id: null
+          fiscal_store_id: null,
+          fiscal_cnpj: null
+        },
+        {
+          order_id: 'order-none-1',
+          order_number: 'ZEISS-NONE-01',
+          status: 'FATURADO',
+          entry_date: '2026-08-04',
+          detail_id: null,
+          detail_store_id: null,
+          detail_codcli: null,
+          fiscal_id: null,
+          fiscal_store_id: null,
+          fiscal_cnpj: null
         }
       ]);
 
       const report = await service.auditHistoricalOrders(continentalCriteria, { dryRun: true });
 
-      expect(report.totalAudited).toBe(3);
-      expect(report.confirmedMatches).toBe(1);
-      expect(report.conflictsCount).toBe(1);
-      expect(report.inconclusiveCandidates).toBe(1);
+      expect(report.totalAudited).toBe(4);
+      expect(report.confirmedMatches).toBe(1); // ONLY order-indep-1 is confirmed
+      expect(report.inconclusiveCandidates).toBe(2); // order-op-1 and order-none-1
+      expect(report.conflictsCount).toBe(1); // order-conflict-1
 
-      const item1 = report.items.find(i => i.orderId === 'order-rel-1');
-      const item2 = report.items.find(i => i.orderId === 'order-rel-2');
-      const item3 = report.items.find(i => i.orderId === 'order-rel-3');
+      const opItem = report.items.find(i => i.orderId === 'order-op-1');
+      const indepItem = report.items.find(i => i.orderId === 'order-indep-1');
+      const confItem = report.items.find(i => i.orderId === 'order-conflict-1');
+      const noneItem = report.items.find(i => i.orderId === 'order-none-1');
 
-      expect(item1?.confidence).toBe('CONFIRMED');
-      expect(item2?.confidence).toBe('CONFLICT');
-      expect(item3?.confidence).toBe('INCONCLUSIVE');
+      // Crucial assertion: operational child store_id alone does NOT confirm the order!
+      expect(opItem?.confidence).toBe('INCONCLUSIVE');
+      expect(opItem?.recommendation).toBe('QUARANTINE_LEGACY');
+      expect(opItem?.evidence.some(e => e.includes('circular'))).toBe(true);
+
+      // Independent evidence does confirm
+      expect(indepItem?.confidence).toBe('CONFIRMED');
+      expect(indepItem?.recommendation).toBe('ATTRIBUTION_ELIGIBLE');
+
+      // Conflict is blocked
+      expect(confItem?.confidence).toBe('CONFLICT');
+      expect(confItem?.recommendation).toBe('EXCEPTION_CONFLICT');
+
+      // Empty is inconclusive
+      expect(noneItem?.confidence).toBe('INCONCLUSIVE');
     });
   });
 });

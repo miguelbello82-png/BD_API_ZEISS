@@ -284,8 +284,17 @@ export class CentralMultiStoreScheduler {
     try {
       this.logger.info('CentralScheduler', 'Acquired lease, starting job for store', loggerCtx);
 
-      // Build store-scoped composition root
-      const root = buildStoreCompositionRoot(this.deps.db, store, this.logger, this.clock, this.sleeper);
+      const fencingCtx = {
+        storeId: store.storeId,
+        provider,
+        domain,
+        operation,
+        ownerToken: this.workerId,
+        isLost: () => ownershipLost
+      };
+
+      // Build store-scoped composition root protected by transactional lease fencing
+      const root = buildStoreCompositionRoot(this.deps.db, store, this.logger, this.clock, this.sleeper, fencingCtx);
       const job = root.registry.get(provider, domain, operation);
 
       if (!job) {
@@ -323,7 +332,7 @@ export class CentralMultiStoreScheduler {
           operation,
           last_sync: new Date(this.clock.now()),
           cursor_value: result.cursorValue !== undefined ? result.cursorValue : (storeState?.cursor_value || null)
-        });
+        }, this.workerId);
 
         this.logger.info('CentralScheduler', 'Job completed successfully for store', { ...loggerCtx, metrics: result.metrics });
         return 'EXECUTED_SUCCESS';
@@ -368,7 +377,7 @@ export class CentralMultiStoreScheduler {
   /**
    * ACH-02: Robust execution with hard timeout, cooperative abort, and containment
    * of non-cooperative background tasks.
-   * 
+   *
    * Architectural Limitation Note:
    * In a single-threaded Node.js event loop, an in-flight asynchronous Promise cannot be forcefully
    * terminated from the outside if it ignores AbortSignal. Containment is enforced by:

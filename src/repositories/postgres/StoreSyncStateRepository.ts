@@ -40,7 +40,45 @@ export class PgStoreSyncStateRepository implements ISyncStateRepository {
     };
   }
 
-  async upsert(state: SyncState): Promise<void> {
+  async upsert(state: SyncState, leaseToken?: string): Promise<void> {
+    if (leaseToken) {
+      const query = `
+        INSERT INTO integration.store_sync_state (store_id, provider, domain, operation, last_sync, cursor_value, updated_at)
+        SELECT $1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP
+        WHERE EXISTS (
+          SELECT 1 FROM integration.store_sync_leases
+          WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4
+            AND owner_token = $7::uuid AND expires_at >= CURRENT_TIMESTAMP
+        )
+        ON CONFLICT (store_id, provider, domain, operation)
+        DO UPDATE SET
+          last_sync = EXCLUDED.last_sync,
+          cursor_value = COALESCE(EXCLUDED.cursor_value, integration.store_sync_state.cursor_value),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE EXISTS (
+          SELECT 1 FROM integration.store_sync_leases
+          WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4
+            AND owner_token = $7::uuid AND expires_at >= CURRENT_TIMESTAMP
+        )
+        RETURNING store_id;
+      `;
+      const result = await this.db.query(query, [
+        this.storeId,
+        state.provider,
+        state.domain,
+        state.operation,
+        state.last_sync,
+        state.cursor_value,
+        leaseToken
+      ]);
+      if (result.length === 0) {
+        throw new Error(
+          `STALE_WRITE_REJECTED: Checkpoint update rejected because lease ownership was lost or expired for owner ${leaseToken}`
+        );
+      }
+      return;
+    }
+
     const query = `
       INSERT INTO integration.store_sync_state (store_id, provider, domain, operation, last_sync, cursor_value, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)

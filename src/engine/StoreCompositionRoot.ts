@@ -24,15 +24,18 @@ import { PgStoreSyncPolicyRepository } from '../repositories/postgres/StoreSyncP
 import { PgStoreSyncStateRepository } from '../repositories/postgres/StoreSyncStateRepository';
 import { PgStoreSyncLeaseRepository } from '../repositories/postgres/StoreSyncLeaseRepository';
 import { PgStoreProviderHealthRepository } from '../repositories/postgres/StoreProviderHealthRepository';
+import { FencedDatabaseExecutor, LeaseFencingContext } from './FencedDatabaseExecutor';
 
 export function buildStoreCompositionDeps(
   db: IDatabaseExecutor,
   storeContext: StoreZeissContext,
   logger: ILogger = new ConsoleLogger(),
   clock: IClock = new RealClock(),
-  sleeper: ISleeper = new RealSleeper()
+  sleeper: ISleeper = new RealSleeper(),
+  fencingContext?: LeaseFencingContext
 ): CompositionRootDeps {
   const storeId = storeContext.storeId;
+  const effectiveDb = fencingContext ? new FencedDatabaseExecutor(db, fencingContext) : db;
 
   // Classifiers
   const mappingConfig = OrderStateMappingLoader.load();
@@ -48,14 +51,14 @@ export function buildStoreCompositionDeps(
   const productsProvider = new ProductsProvider(storeContext);
   const detailProvider = new OrdersProvider(storeContext);
 
-  // Setup Store-Scoped Data Repositories
-  const ordersRepo = new PgOrdersRepository(db, storeId);
-  const detailsRepo = new PgOrderDetailsRepository(db, storeId);
-  const trackingRepo = new PgTrackingRepository(db, storeId);
-  const campaignsRepo = new PgCampaignsRepository(db, storeId);
-  const leadsRepo = new PgLeadsRepository(db, storeId);
-  const receivablesRepo = new PgReceivablesRepository(db, storeId);
-  const productsRepo = new PgProductsRepository(db); // Global catalog
+  // Setup Store-Scoped Data Repositories (protected by lease fencing when active)
+  const ordersRepo = new PgOrdersRepository(effectiveDb, storeId);
+  const detailsRepo = new PgOrderDetailsRepository(effectiveDb, storeId);
+  const trackingRepo = new PgTrackingRepository(effectiveDb, storeId);
+  const campaignsRepo = new PgCampaignsRepository(effectiveDb, storeId);
+  const leadsRepo = new PgLeadsRepository(effectiveDb, storeId);
+  const receivablesRepo = new PgReceivablesRepository(effectiveDb, storeId);
+  const productsRepo = new PgProductsRepository(effectiveDb); // Global catalog
 
   // Setup Store-Scoped Sync Control Repositories
   const policyRepo = new PgStoreSyncPolicyRepository(db, storeId);
@@ -97,8 +100,9 @@ export function buildStoreCompositionRoot(
   storeContext: StoreZeissContext,
   logger: ILogger = new ConsoleLogger(),
   clock: IClock = new RealClock(),
-  sleeper: ISleeper = new RealSleeper()
+  sleeper: ISleeper = new RealSleeper(),
+  fencingContext?: LeaseFencingContext
 ): CompositionRoot {
-  const deps = buildStoreCompositionDeps(db, storeContext, logger, clock, sleeper);
+  const deps = buildStoreCompositionDeps(db, storeContext, logger, clock, sleeper, fencingContext);
   return new CompositionRoot(deps);
 }

@@ -381,26 +381,36 @@ export class ServingApiServer {
 
   private async parseJsonBody(req: http.IncomingMessage): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      let body = '';
+      const chunks: Buffer[] = [];
+      let bytesReceived = 0;
       let rejected = false;
-      const MAX_BYTES = 1024 * 1024; // 1MB limit
+      const MAX_BYTES = 1024 * 1024; // 1MB limit = 1,048,576 bytes
 
       const onData = (chunk: Buffer | string) => {
         if (rejected) return;
-        body += chunk;
-        if (body.length > MAX_BYTES) {
+        const chunkBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytesReceived += chunkBuf.length;
+
+        if (bytesReceived > MAX_BYTES) {
           rejected = true;
-          body = ''; // Free buffer memory immediately
+          chunks.length = 0; // Free buffer memory immediately
           req.removeListener('data', onData);
           req.removeListener('end', onEnd);
           // Resume and discard stream so connection does not stall
           req.resume();
           reject(new ApiError(400, 'BAD_REQUEST', 'Request payload too large'));
+          return;
         }
+        chunks.push(chunkBuf);
       };
 
       const onEnd = () => {
         if (rejected) return;
+        if (chunks.length === 0) {
+          resolve({});
+          return;
+        }
+        const body = Buffer.concat(chunks).toString('utf8');
         if (!body || body.trim() === '') {
           resolve({});
           return;
