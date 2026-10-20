@@ -64,7 +64,7 @@ export function buildStoreCompositionDeps(
   const policyRepo = new PgStoreSyncPolicyRepository(db, storeId);
   const stateRepo = new PgStoreSyncStateRepository(db, storeId);
   const leaseRepo = new PgStoreSyncLeaseRepository(db, storeId);
-  const healthRepo = new PgStoreProviderHealthRepository(db, storeId);
+  const healthRepo = new PgStoreProviderHealthRepository(effectiveDb, storeId);
 
   return {
     policyRepo,

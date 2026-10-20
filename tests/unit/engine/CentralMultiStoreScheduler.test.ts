@@ -472,6 +472,20 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
 
           // store_sync_leases FOR UPDATE / findActive
           if (sql.includes('FROM integration.store_sync_leases') && sql.includes('SELECT') && !sql.includes('integration.store_sync_state')) {
+            if (sql.includes('FOR UPDATE')) {
+              if (activeLease) {
+                return [{
+                  store_id: activeLease.store_id,
+                  provider: activeLease.provider,
+                  domain: activeLease.domain,
+                  operation: activeLease.operation,
+                  owner_token: activeLease.owner_token,
+                  expires_at: new Date(activeLease.expires_at),
+                  is_valid: activeLease.expires_at >= Date.now()
+                }];
+              }
+              return [];
+            }
             if (activeLease && activeLease.expires_at >= Date.now()) {
               return [{
                 store_id: activeLease.store_id,

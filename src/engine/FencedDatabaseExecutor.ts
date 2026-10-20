@@ -74,12 +74,12 @@ export class FencedDatabaseExecutor implements IDatabaseExecutor {
 
   private async validateLeaseOwnership(executor: IDatabaseExecutor): Promise<void> {
     const checkSql = `
-      SELECT owner_token, expires_at 
+      SELECT owner_token, expires_at, (expires_at >= CURRENT_TIMESTAMP) AS is_valid
       FROM integration.store_sync_leases
       WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4
       FOR UPDATE
     `;
-    const rows = await executor.query<{ owner_token: string; expires_at: Date }>(checkSql, [
+    const rows = await executor.query<{ owner_token: string; expires_at: Date; is_valid?: boolean }>(checkSql, [
       this.context.storeId,
       this.context.provider,
       this.context.domain,
@@ -96,6 +96,14 @@ export class FencedDatabaseExecutor implements IDatabaseExecutor {
     if (currentOwner !== this.context.ownerToken) {
       throw new StaleWriteError(
         `Stale write rejected: lease ownership token mismatch (held by ${currentOwner}, caller token ${this.context.ownerToken})`
+      );
+    }
+
+    const isExpired = rows[0].is_valid === false ||
+      (rows[0].expires_at ? new Date(rows[0].expires_at).getTime() < Date.now() : true);
+    if (isExpired) {
+      throw new StaleWriteError(
+        `Stale write rejected: lease for store ${this.context.storeId} on ${this.context.provider}:${this.context.domain}:${this.context.operation} has expired (expired at ${rows[0].expires_at})`
       );
     }
   }
