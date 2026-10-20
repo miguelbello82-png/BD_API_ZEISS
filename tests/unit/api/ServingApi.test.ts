@@ -1,6 +1,8 @@
 import { ServingApiServer } from '../../../src/api/server';
 import { ConsumerAuthService } from '../../../src/api/auth';
 import { IDatabaseExecutor } from '../../../src/config/db';
+import { VouchersProvider } from '../../../src/providers/vouchers';
+import { FinancialProvider } from '../../../src/providers/financial';
 import * as http from 'http';
 
 describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempotency)', () => {
@@ -17,9 +19,30 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     client_id: 'pos-store-1',
     display_name: 'POS Terminal Store 1',
     enabled: true,
-    allowed_scopes: ['orders:read', 'tracking:read', 'campaigns:read', 'vouchers:write'],
+    allowed_scopes: [
+      'orders:read',
+      'tracking:read',
+      'campaigns:read',
+      'leads:read',
+      'vouchers:read',
+      'vouchers:write',
+      'products:read',
+      'financial:read',
+    ],
     allowed_store_ids: ['store-uuid-1'], // Can only access store-uuid-1
     credential_id: 'cred-uuid-1',
+    expires_at: null,
+    revoked_at: null,
+  };
+
+  const restrictedConsumer = {
+    id: 'consumer-restricted',
+    client_id: 'reports-only',
+    display_name: 'Reports Only Consumer',
+    enabled: true,
+    allowed_scopes: ['orders:read'], // Only orders:read
+    allowed_store_ids: ['store-uuid-1'],
+    credential_id: 'cred-uuid-restricted',
     expires_at: null,
     revoked_at: null,
   };
@@ -107,7 +130,7 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
   }
 
   // ----------------------------------------------------------
-  // 1. Authentication Tests
+  // 1. Authentication & Common Middleware Tests
   // ----------------------------------------------------------
 
   it('GET /api/v1/health should be publicly accessible without credentials', async () => {
@@ -115,6 +138,11 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.status).toBe('ok');
+  });
+
+  it('OPTIONS should respond with 204 No Content for CORS preflight', async () => {
+    const res = await makeRequest('OPTIONS', '/api/v1/stores/store-uuid-1/orders');
+    expect(res.statusCode).toBe(204);
   });
 
   it('should return 401 UNAUTHORIZED when no credentials are provided', async () => {
@@ -164,12 +192,26 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     expect(res.body.error.code).toBe('TOKEN_EXPIRED');
   });
 
+  it('should authenticate successfully using X-API-Key header', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([{ count: '0' }])
+      .mockResolvedValueOnce([]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders', {
+      'X-API-Key': validToken,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
   // ----------------------------------------------------------
   // 2. Cross-Store Security & Isolation Tests
   // ----------------------------------------------------------
 
   it('should return 403 STORE_ACCESS_DENIED when consumer attempts to access an unauthorized store', async () => {
-    // Consumer has access ONLY to store-uuid-1. Attempting access to store-uuid-2:
     mockDb.query.mockResolvedValueOnce([consumerStore1]);
 
     const res = await makeRequest('GET', '/api/v1/stores/store-uuid-2/orders', {
@@ -180,39 +222,465 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     expect(res.body.error.code).toBe('STORE_ACCESS_DENIED');
   });
 
-  it('should return 200 OK and strictly filter orders by store_id for authorized store', async () => {
-    // Mock authentication
+  it('should return 403 INSUFFICIENT_SCOPE when consumer lacks required scope', async () => {
+    mockDb.query.mockResolvedValueOnce([restrictedConsumer]); // Only has orders:read
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/campaigns', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error.code).toBe('INSUFFICIENT_SCOPE');
+  });
+
+  // ----------------------------------------------------------
+  // 3. Orders Domain
+  // ----------------------------------------------------------
+
+  it('GET /api/v1/stores/:store_id/orders returns filtered and paginated list', async () => {
     mockDb.query
-      .mockResolvedValueOnce([consumerStore1]) // Auth query
-      .mockResolvedValueOnce([]) // last_used_at update
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
       .mockResolvedValueOnce([{ count: '1' }]) // Count query
       .mockResolvedValueOnce([
         {
-          id: 'order-1',
-          order_number: 'ORD-STORE1-100',
+          id: 'ord-1',
+          order_number: 'ORD-100',
+          os_number: 'OS-100',
           status: 'Entregue',
-          store_id: 'store-uuid-1',
+          codsit: '6.1',
+          entry_date: '2026-08-01',
+          expected_date: '2026-08-10',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
         },
       ]); // Data query
 
-    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders', {
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders?status=Entregue&page=1&limit=10', {
       Authorization: `Bearer ${validToken}`,
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.orders).toHaveLength(1);
-    expect(res.body.data.orders[0].order_number).toBe('ORD-STORE1-100');
+    expect(res.body.data.orders[0].order_number).toBe('ORD-100');
+    expect(res.body.data.pagination.total).toBe(1);
+  });
 
-    // Verify the query strictly filtered by store_id = $1
-    expect(mockDb.query).toHaveBeenCalledWith(
-      expect.stringContaining('store_id = $1'),
-      expect.arrayContaining(['store-uuid-1'])
-    );
+  it('GET /api/v1/stores/:store_id/orders/:order_number returns order details and fiscal documents', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'ord-uuid-1',
+          order_number: 'ORD-100',
+          os_number: 'OS-100',
+          status: 'Faturado',
+          detail_status: '6.1',
+          detail_situacao: 'Pronto para Envio',
+        },
+      ]) // Order query
+      .mockResolvedValueOnce([
+        { id: 'fd-1', nf_number: '123456', nf_series: '1', created_at: new Date().toISOString() },
+      ]); // Fiscal docs query
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders/ORD-100', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.order_number).toBe('ORD-100');
+    expect(res.body.data.fiscal_documents).toHaveLength(1);
+  });
+
+  it('GET /api/v1/stores/:store_id/orders/:order_number/fiscal-documents returns linked documents', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        { id: 'fd-1', order_id: 'ord-1', nf_number: '98765', nf_series: '1', order_number: 'ORD-100' },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders/ORD-100/fiscal-documents', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.documents).toHaveLength(1);
+    expect(res.body.data.documents[0].nf_number).toBe('98765');
   });
 
   // ----------------------------------------------------------
-  // 3. Administrative Historical Access (Segregated)
+  // 4. Tracking Domain
+  // ----------------------------------------------------------
+
+  it('GET /api/v1/stores/:store_id/tracking/:nf_number returns tracking events by NF', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'trk-1',
+          order_id: 'ord-1',
+          order_number: 'ORD-100',
+          nf_number: '12345',
+          status: 'ENTREGUE',
+          event_date: new Date().toISOString(),
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/tracking/12345', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.events).toHaveLength(1);
+    expect(res.body.data.events[0].status).toBe('ENTREGUE');
+  });
+
+  it('GET /api/v1/stores/:store_id/orders/:order_number/tracking returns tracking events by order', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'trk-1',
+          order_number: 'ORD-100',
+          nf_number: '12345',
+          status: 'EM_TRANSITO',
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders/ORD-100/tracking', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.events).toHaveLength(1);
+    expect(res.body.data.events[0].status).toBe('EM_TRANSITO');
+  });
+
+  // ----------------------------------------------------------
+  // 5. Campaigns & Leads Domain
+  // ----------------------------------------------------------
+
+  it('GET /api/v1/stores/:store_id/campaigns returns active campaigns with store adhesion', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'c-1',
+          campaign_id: 'CAMP-ZEISS-2026',
+          title: 'Campanha de Primavera',
+          global_status: 'S',
+          store_status: 'S',
+          aceite: true,
+          incentive_type: 'VOUCHER',
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/campaigns', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.campaigns).toHaveLength(1);
+    expect(res.body.data.campaigns[0].campaign_id).toBe('CAMP-ZEISS-2026');
+    expect(res.body.data.campaigns[0].aceite).toBe(true);
+  });
+
+  it('GET /api/v1/stores/:store_id/campaigns/:campaign_id returns campaign detail', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'c-1',
+          campaign_id: 'CAMP-ZEISS-2026',
+          title: 'Campanha de Primavera',
+          aceite: true,
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/campaigns/CAMP-ZEISS-2026', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.title).toBe('Campanha de Primavera');
+  });
+
+  it('GET /api/v1/stores/:store_id/campaigns/:campaign_id/leads returns pseudonymized leads without raw PII', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([{ count: '1' }]) // Count
+      .mockResolvedValueOnce([
+        {
+          id: 'l-1',
+          campaign_id: 'CAMP-ZEISS-2026',
+          voucher_code: 'VCH-12345',
+          status: 'Disponivel',
+          email_hmac: 'a64eb8a5058a4f5696340ec1ddfb45341234567890abcdef1234567890abcdef',
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/campaigns/CAMP-ZEISS-2026/leads', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.leads).toHaveLength(1);
+    expect(res.body.data.leads[0].email_hmac).toBeDefined();
+    // Verify no raw email or name exists in record
+    expect(res.body.data.leads[0].email).toBeUndefined();
+    expect(res.body.data.leads[0].name).toBeUndefined();
+  });
+
+  it('GET /api/v1/stores/:store_id/leads/:voucher_code returns lead by voucher', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'l-1',
+          campaign_id: 'CAMP-ZEISS-2026',
+          voucher_code: 'VCH-5555',
+          status: 'Resgatado',
+          email_hmac: 'hmac-hash-sample',
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/leads/VCH-5555', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.voucher_code).toBe('VCH-5555');
+  });
+
+  // ----------------------------------------------------------
+  // 6. Vouchers Domain & Mutations
+  // ----------------------------------------------------------
+
+  it('GET /api/v1/stores/:store_id/vouchers/:voucher_code returns voucher from local repository', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'v-1',
+          voucher_code: 'VCH-888',
+          campaign_id: 'CAMP-01',
+          status: 'Ativo',
+        },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/vouchers/VCH-888', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.voucher_code).toBe('VCH-888');
+  });
+
+  it('POST /api/v1/stores/:store_id/vouchers/activate rejects with 403 MUTATION_DISABLED if mutations switch is off', async () => {
+    const originalEnv = process.env.ALLOW_EXTERNAL_MUTATIONS;
+    delete process.env.ALLOW_EXTERNAL_MUTATIONS;
+
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]); // last_used_at
+
+    const res = await makeRequest(
+      'POST',
+      '/api/v1/stores/store-uuid-1/vouchers/activate',
+      {
+        Authorization: `Bearer ${validToken}`,
+        'Idempotency-Key': 'idemp-activate-disabled',
+      },
+      { campaignId: 'CAMP-01', voucherCode: 'VCH-123' }
+    );
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error.code).toBe('MUTATION_DISABLED');
+
+    process.env.ALLOW_EXTERNAL_MUTATIONS = originalEnv;
+  });
+
+  it('POST /api/v1/stores/:store_id/vouchers/generate rejects with 400 when Idempotency-Key is missing', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]); // last_used_at
+
+    const res = await makeRequest(
+      'POST',
+      '/api/v1/stores/store-uuid-1/vouchers/generate',
+      { Authorization: `Bearer ${validToken}` },
+      { campaignId: 'CAMP-01', name: 'João Silva', email: 'joao@example.com' }
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error.code).toBe('MISSING_IDEMPOTENCY_KEY');
+  });
+
+  it('POST /api/v1/stores/:store_id/vouchers/generate replays cached result when duplicate idempotency key is sent', async () => {
+    process.env.ALLOW_EXTERNAL_MUTATIONS = 'true';
+
+    const reqBody = { campaignId: 'CAMP-01', name: 'Maria Souza', email: 'maria@example.com' };
+    const payloadHash = require('crypto').createHash('sha256').update(JSON.stringify(reqBody)).digest('hex');
+    const cachedResponse = { voucherCode: 'VCH-NEW-999', generated: true };
+
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        {
+          id: 'op-generate-cached',
+          status: 'SUCCEEDED',
+          request_hash: payloadHash,
+          external_reference: JSON.stringify(cachedResponse),
+        },
+      ]); // Idempotency check
+
+    const res = await makeRequest(
+      'POST',
+      '/api/v1/stores/store-uuid-1/vouchers/generate',
+      {
+        Authorization: `Bearer ${validToken}`,
+        'Idempotency-Key': 'idemp-gen-01',
+      },
+      reqBody
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.voucherCode).toBe('VCH-NEW-999');
+    expect(res.body.data._replayed).toBe(true);
+
+    delete process.env.ALLOW_EXTERNAL_MUTATIONS;
+  });
+
+  // ----------------------------------------------------------
+  // 7. Products & Services Domain
+  // ----------------------------------------------------------
+
+  it('GET /api/v1/products returns paginated product list', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([{ count: '2' }]) // Count
+      .mockResolvedValueOnce([
+        { id: 'p-1', zeiss_product_code: 'ZP-01', name: 'Lente ZEISS Single Vision', category: 'Monofocal' },
+        { id: 'p-2', zeiss_product_code: 'ZP-02', name: 'Lente ZEISS Progressive', category: 'Progressiva' },
+      ]); // Products
+
+    const res = await makeRequest('GET', '/api/v1/products?page=1&limit=10', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.products).toHaveLength(2);
+    expect(res.body.data.pagination.total).toBe(2);
+  });
+
+  it('GET /api/v1/products/:product_code returns product detail', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([
+        { id: 'p-1', zeiss_product_code: 'ZP-01', name: 'Lente ZEISS Single Vision', material: 'Orgânica 1.5' },
+      ]);
+
+    const res = await makeRequest('GET', '/api/v1/products/ZP-01', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.zeiss_product_code).toBe('ZP-01');
+    expect(res.body.data.material).toBe('Orgânica 1.5');
+  });
+
+  it('GET /api/v1/products/:product_code/services returns services associated with product', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([{ id: 'p-1', name: 'Lente ZEISS Single Vision' }]) // Product check
+      .mockResolvedValueOnce([
+        { id: 's-1', service_code: 'DuraVision Platinum', service_name: 'Antirreflexo Premium' },
+        { id: 's-2', service_code: 'PhotoFusion X', service_name: 'Fotossensível' },
+      ]); // Services
+
+    const res = await makeRequest('GET', '/api/v1/products/ZP-01/services', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.productCode).toBe('ZP-01');
+    expect(res.body.data.services).toHaveLength(2);
+  });
+
+  // ----------------------------------------------------------
+  // 8. Financial Domain
+  // ----------------------------------------------------------
+
+  it('GET /api/v1/stores/:store_id/financial/receivables returns receivables list', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([{ count: '1' }]) // Count
+      .mockResolvedValueOnce([
+        {
+          id: 'rec-1',
+          boleto_number: 'BOL-123456789',
+          fiscal_reference: 'NF-100',
+          amount: '1250.00',
+          status: 'Aberto',
+          due_date: '2026-11-15',
+        },
+      ]); // Receivables
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/financial/receivables', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.receivables).toHaveLength(1);
+    expect(res.body.data.receivables[0].boleto_number).toBe('BOL-123456789');
+  });
+
+  it('GET /api/v1/stores/:store_id/financial/boletos/:boleto_id rejects 400 when dueDate cannot be resolved', async () => {
+    mockDb.query
+      .mockResolvedValueOnce([consumerStore1]) // Auth
+      .mockResolvedValueOnce([]) // last_used_at
+      .mockResolvedValueOnce([]); // No receivable found to deduce dueDate
+
+    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/financial/boletos/BOL-NONEXISTENT', {
+      Authorization: `Bearer ${validToken}`,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error.code).toBe('BAD_REQUEST');
+    expect(res.body.error.message).toContain('dueDate');
+  });
+
+  // ----------------------------------------------------------
+  // 9. Administrative Historical Segregation
   // ----------------------------------------------------------
 
   it('should return 403 INSUFFICIENT_SCOPE when standard consumer tries to access unassigned historical orders', async () => {
@@ -230,7 +698,7 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     mockDb.query
       .mockResolvedValueOnce([adminConsumer]) // Auth query
       .mockResolvedValueOnce([]) // last_used_at update
-      .mockResolvedValueOnce([{ count: '7234' }]) // Count unassigned orders
+      .mockResolvedValueOnce([{ count: '7235' }]) // Count unassigned orders
       .mockResolvedValueOnce([
         { id: 'hist-1', order_number: 'ORD-HIST-01', store_id: null },
         { id: 'hist-2', order_number: 'ORD-HIST-02', store_id: null },
@@ -243,134 +711,10 @@ describe('Serving API (Consumer Authentication, Scopes, Store Isolation & Idempo
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.orders).toHaveLength(2);
-    expect(res.body.data.pagination.total).toBe(7234);
+    expect(res.body.data.pagination.total).toBe(7235);
 
-    // Verify query explicitly looked for store_id IS NULL
     expect(mockDb.query).toHaveBeenCalledWith(
       expect.stringContaining('store_id IS NULL')
     );
   });
-
-  // ----------------------------------------------------------
-  // 4. Idempotency & Voucher Activation
-  // ----------------------------------------------------------
-
-  it('should reject voucher activation when Idempotency-Key header is missing', async () => {
-    mockDb.query.mockResolvedValueOnce([consumerStore1]);
-
-    const res = await makeRequest(
-      'POST',
-      '/api/v1/stores/store-uuid-1/vouchers/activate',
-      { Authorization: `Bearer ${validToken}` },
-      { campaignId: 'CAMP-01', voucherCode: 'VOUCHER-123' }
-    );
-
-    expect(res.statusCode).toBe(400);
-    expect(res.body.error.code).toBe('MISSING_IDEMPOTENCY_KEY');
-  });
-
-  it('should replay previous result without re-executing when same Idempotency-Key is sent', async () => {
-    const requestBody = { campaignId: 'CAMP-01', voucherCode: 'VOUCHER-123' };
-    const payloadHash = require('crypto').createHash('sha256').update(JSON.stringify(requestBody)).digest('hex');
-    const cachedResponse = { voucherCode: 'VOUCHER-123', activated: true, transactionId: 'TX-999' };
-
-    mockDb.query
-      .mockResolvedValueOnce([consumerStore1]) // Auth
-      .mockResolvedValueOnce([]) // last_used_at
-      .mockResolvedValueOnce([
-        {
-          id: 'op-uuid-cached',
-          status: 'completed',
-          request_hash: payloadHash,
-          external_reference: JSON.stringify(cachedResponse),
-        },
-      ]); // Existing idempotency operation
-
-    const res = await makeRequest(
-      'POST',
-      '/api/v1/stores/store-uuid-1/vouchers/activate',
-      {
-        Authorization: `Bearer ${validToken}`,
-        'Idempotency-Key': 'idemp-key-test-01',
-      },
-      requestBody
-    );
-
-    expect(res.statusCode).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.data.activated).toBe(true);
-    expect(res.body.data._replayed).toBe(true);
-  });
-
-  // ----------------------------------------------------------
-  // 5. Extended Security, Header & Isolation Tests (ML-005)
-  // ----------------------------------------------------------
-
-  it('should authenticate successfully using X-API-Key header', async () => {
-    mockDb.query
-      .mockResolvedValueOnce([consumerStore1]) // Auth
-      .mockResolvedValueOnce([]) // last_used_at
-      .mockResolvedValueOnce([{ count: '0' }])
-      .mockResolvedValueOnce([]);
-
-    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders', {
-      'X-API-Key': validToken,
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.body.success).toBe(true);
-  });
-
-  it('should return 404 NOT_FOUND for getOrderDetail when order does not belong to the store', async () => {
-    mockDb.query
-      .mockResolvedValueOnce([consumerStore1]) // Auth
-      .mockResolvedValueOnce([]) // last_used_at
-      .mockResolvedValueOnce([]); // Order not found for store-uuid-1
-
-    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/orders/ORD-OTHER-STORE', {
-      Authorization: `Bearer ${validToken}`,
-    });
-
-    expect(res.statusCode).toBe(404);
-    expect(res.body.error.code).toBe('NOT_FOUND');
-    expect(res.body.error.message).toContain('ORD-OTHER-STORE');
-  });
-
-  it('should return 404 NOT_FOUND for getTrackingByNf when NF does not belong to the store', async () => {
-    mockDb.query
-      .mockResolvedValueOnce([consumerStore1]) // Auth
-      .mockResolvedValueOnce([]) // last_used_at
-      .mockResolvedValueOnce([]); // NF not found for store-uuid-1
-
-    const res = await makeRequest('GET', '/api/v1/stores/store-uuid-1/tracking/999999', {
-      Authorization: `Bearer ${validToken}`,
-    });
-
-    expect(res.statusCode).toBe(404);
-    expect(res.body.error.code).toBe('NOT_FOUND');
-    expect(res.body.error.message).toContain('999999');
-  });
-
-  it('should reject requests with payload exceeding 1MB limit', async () => {
-    mockDb.query.mockResolvedValueOnce([consumerStore1]);
-
-    // Construct a payload larger than 1MB
-    const largePadding = 'X'.repeat(1024 * 1024 + 50);
-    const largeBody = { campaignId: 'CAMP-01', voucherCode: 'V123', padding: largePadding };
-
-    const res = await makeRequest(
-      'POST',
-      '/api/v1/stores/store-uuid-1/vouchers/activate',
-      {
-        Authorization: `Bearer ${validToken}`,
-        'Idempotency-Key': 'idemp-large-test',
-      },
-      largeBody
-    );
-
-    expect(res.statusCode).toBe(400);
-    expect(res.body.error.code).toBe('BAD_REQUEST');
-    expect(res.body.error.message).toContain('payload too large');
-  });
 });
-

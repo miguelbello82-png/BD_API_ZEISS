@@ -12,7 +12,7 @@ import { IDatabaseExecutor, createPgPool, PgDatabaseExecutor } from '../config/d
 import { ConsumerAuthService } from './auth';
 import { AuditService } from './audit';
 import { ApiHandlers } from './handlers';
-import { ApiError, StandardApiResponse } from './types';
+import { ApiError, StandardApiResponse, VoucherGenerateRequestPayload } from './types';
 import { IStoreResolutionService } from '../core/StoreResolutionService';
 import { ILogger, ConsoleLogger } from '../observability/Logger';
 
@@ -76,7 +76,7 @@ export class ServingApiServer {
     const startTime = Date.now();
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Idempotency-Key, X-API-Key');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Idempotency-Key, X-API-Key, X-Idempotency-Key');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 
     if (req.method === 'OPTIONS') {
@@ -93,7 +93,9 @@ export class ServingApiServer {
         queryParams[key] = val;
       });
 
-      // Public health check
+      // --------------------------------------------------------
+      // Route 0: Public Health Check
+      // --------------------------------------------------------
       if (req.method === 'GET' && pathname === '/api/v1/health') {
         this.sendJson(res, 200, {
           success: true,
@@ -102,7 +104,7 @@ export class ServingApiServer {
         return;
       }
 
-      // Authentication Middleware (All other endpoints require authenticated consumer)
+      // Authentication Middleware (All endpoints below require authenticated consumer)
       const authHeader = (req.headers['authorization'] || req.headers['x-api-key']) as string | undefined;
       const consumer = await this.authService.authenticate(authHeader);
 
@@ -110,8 +112,10 @@ export class ServingApiServer {
       let targetStoreId: string | undefined;
 
       // --------------------------------------------------------
-      // Route 1: GET /api/v1/stores/:store_id/orders
+      // DOMAIN 1: ORDERS
       // --------------------------------------------------------
+
+      // GET /api/v1/stores/:store_id/orders
       const ordersListMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/orders\/?$/);
       if (req.method === 'GET' && ordersListMatch) {
         targetStoreId = ordersListMatch[1];
@@ -121,9 +125,29 @@ export class ServingApiServer {
         return;
       }
 
-      // --------------------------------------------------------
-      // Route 2: GET /api/v1/stores/:store_id/orders/:order_number
-      // --------------------------------------------------------
+      // GET /api/v1/stores/:store_id/orders/:order_number/tracking
+      const orderTrackingMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/orders\/([^/]+)\/tracking\/?$/);
+      if (req.method === 'GET' && orderTrackingMatch) {
+        targetStoreId = orderTrackingMatch[1];
+        const orderNumber = decodeURIComponent(orderTrackingMatch[2]);
+        this.authService.authorize(consumer, 'tracking:read', targetStoreId);
+        responseData = await this.handlers.getTrackingByOrder(targetStoreId, orderNumber);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/stores/:store_id/orders/:order_number/fiscal-documents
+      const orderFiscalMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/orders\/([^/]+)\/fiscal-documents\/?$/);
+      if (req.method === 'GET' && orderFiscalMatch) {
+        targetStoreId = orderFiscalMatch[1];
+        const orderNumber = decodeURIComponent(orderFiscalMatch[2]);
+        this.authService.authorize(consumer, 'financial:read', targetStoreId);
+        responseData = await this.handlers.listFiscalDocuments(targetStoreId, orderNumber);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/stores/:store_id/orders/:order_number
       const orderDetailMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/orders\/([^/]+)\/?$/);
       if (req.method === 'GET' && orderDetailMatch) {
         targetStoreId = orderDetailMatch[1];
@@ -135,8 +159,10 @@ export class ServingApiServer {
       }
 
       // --------------------------------------------------------
-      // Route 3: GET /api/v1/stores/:store_id/tracking/:nf_number
+      // DOMAIN 2: TRACKING
       // --------------------------------------------------------
+
+      // GET /api/v1/stores/:store_id/tracking/:nf_number
       const trackingMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/tracking\/([^/]+)\/?$/);
       if (req.method === 'GET' && trackingMatch) {
         targetStoreId = trackingMatch[1];
@@ -148,20 +174,10 @@ export class ServingApiServer {
       }
 
       // --------------------------------------------------------
-      // Route 4: GET /api/v1/stores/:store_id/campaigns
+      // DOMAIN 3: CAMPAIGNS
       // --------------------------------------------------------
-      const campaignsMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/campaigns\/?$/);
-      if (req.method === 'GET' && campaignsMatch) {
-        targetStoreId = campaignsMatch[1];
-        this.authService.authorize(consumer, 'campaigns:read', targetStoreId);
-        responseData = await this.handlers.listCampaigns(targetStoreId);
-        this.sendJson(res, 200, { success: true, data: responseData });
-        return;
-      }
 
-      // --------------------------------------------------------
-      // Route 5: GET /api/v1/stores/:store_id/campaigns/:campaign_id/leads
-      // --------------------------------------------------------
+      // GET /api/v1/stores/:store_id/campaigns/:campaign_id/leads
       const leadsMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/campaigns\/([^/]+)\/leads\/?$/);
       if (req.method === 'GET' && leadsMatch) {
         targetStoreId = leadsMatch[1];
@@ -172,9 +188,47 @@ export class ServingApiServer {
         return;
       }
 
+      // GET /api/v1/stores/:store_id/campaigns/:campaign_id
+      const campaignDetailMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/campaigns\/([^/]+)\/?$/);
+      if (req.method === 'GET' && campaignDetailMatch) {
+        targetStoreId = campaignDetailMatch[1];
+        const campaignId = decodeURIComponent(campaignDetailMatch[2]);
+        this.authService.authorize(consumer, 'campaigns:read', targetStoreId);
+        responseData = await this.handlers.getCampaignDetail(targetStoreId, campaignId);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/stores/:store_id/campaigns
+      const campaignsMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/campaigns\/?$/);
+      if (req.method === 'GET' && campaignsMatch) {
+        targetStoreId = campaignsMatch[1];
+        this.authService.authorize(consumer, 'campaigns:read', targetStoreId);
+        responseData = await this.handlers.listCampaigns(targetStoreId);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
       // --------------------------------------------------------
-      // Route 6: POST /api/v1/stores/:store_id/vouchers/activate
+      // DOMAIN 4: LEADS
       // --------------------------------------------------------
+
+      // GET /api/v1/stores/:store_id/leads/:voucher_code
+      const leadByVoucherMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/leads\/([^/]+)\/?$/);
+      if (req.method === 'GET' && leadByVoucherMatch) {
+        targetStoreId = leadByVoucherMatch[1];
+        const voucherCode = decodeURIComponent(leadByVoucherMatch[2]);
+        this.authService.authorize(consumer, 'leads:read', targetStoreId);
+        responseData = await this.handlers.getLeadByVoucher(targetStoreId, voucherCode);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // --------------------------------------------------------
+      // DOMAIN 5: VOUCHERS
+      // --------------------------------------------------------
+
+      // POST /api/v1/stores/:store_id/vouchers/activate
       const voucherActivateMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/vouchers\/activate\/?$/);
       if (req.method === 'POST' && voucherActivateMatch) {
         targetStoreId = voucherActivateMatch[1];
@@ -186,9 +240,102 @@ export class ServingApiServer {
         return;
       }
 
+      // POST /api/v1/stores/:store_id/vouchers/generate
+      const voucherGenerateMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/vouchers\/generate\/?$/);
+      if (req.method === 'POST' && voucherGenerateMatch) {
+        targetStoreId = voucherGenerateMatch[1];
+        this.authService.authorize(consumer, 'vouchers:write', targetStoreId);
+        const idempotencyKey = (req.headers['idempotency-key'] || req.headers['x-idempotency-key']) as string | undefined;
+        const body = await this.parseJsonBody(req);
+        responseData = await this.handlers.generateVoucher(targetStoreId, consumer.id, idempotencyKey, body as VoucherGenerateRequestPayload);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/stores/:store_id/vouchers/:voucher_code
+      const voucherDetailMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/vouchers\/([^/]+)\/?$/);
+      if (req.method === 'GET' && voucherDetailMatch) {
+        targetStoreId = voucherDetailMatch[1];
+        const voucherCode = decodeURIComponent(voucherDetailMatch[2]);
+        this.authService.authorize(consumer, 'vouchers:read', targetStoreId);
+        responseData = await this.handlers.getVoucherDetail(targetStoreId, voucherCode, queryParams);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
       // --------------------------------------------------------
-      // Route 7: GET /api/v1/admin/unassigned-orders (Segregated)
+      // DOMAIN 6: PRODUCTS & SERVICES (Catalog Domain)
       // --------------------------------------------------------
+
+      // GET /api/v1/products/:product_code/services
+      const productServicesMatch = pathname.match(/^\/api\/v1\/products\/([^/]+)\/services\/?$/);
+      if (req.method === 'GET' && productServicesMatch) {
+        this.authService.enforceScope(consumer, 'products:read');
+        const productCode = decodeURIComponent(productServicesMatch[1]);
+        responseData = await this.handlers.listProductServices(productCode);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/products/:product_code
+      const productDetailMatch = pathname.match(/^\/api\/v1\/products\/([^/]+)\/?$/);
+      if (req.method === 'GET' && productDetailMatch) {
+        this.authService.enforceScope(consumer, 'products:read');
+        const productCode = decodeURIComponent(productDetailMatch[1]);
+        responseData = await this.handlers.getProductDetail(productCode);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/products
+      if (req.method === 'GET' && pathname === '/api/v1/products') {
+        this.authService.enforceScope(consumer, 'products:read');
+        responseData = await this.handlers.listProducts(queryParams);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // --------------------------------------------------------
+      // DOMAIN 7: FINANCIAL & DOCUMENTS
+      // --------------------------------------------------------
+
+      // GET /api/v1/stores/:store_id/financial/receivables
+      const receivablesMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/financial\/receivables\/?$/);
+      if (req.method === 'GET' && receivablesMatch) {
+        targetStoreId = receivablesMatch[1];
+        this.authService.authorize(consumer, 'financial:read', targetStoreId);
+        responseData = await this.handlers.listReceivables(targetStoreId, queryParams);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/stores/:store_id/financial/boletos/:boleto_id
+      const boletoMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/financial\/boletos\/([^/]+)\/?$/);
+      if (req.method === 'GET' && boletoMatch) {
+        targetStoreId = boletoMatch[1];
+        const boletoId = decodeURIComponent(boletoMatch[2]);
+        this.authService.authorize(consumer, 'financial:read', targetStoreId);
+        responseData = await this.handlers.getBoleto(targetStoreId, boletoId, queryParams);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // GET /api/v1/stores/:store_id/financial/danfe/:nf_number
+      const danfeMatch = pathname.match(/^\/api\/v1\/stores\/([^/]+)\/financial\/danfe\/([^/]+)\/?$/);
+      if (req.method === 'GET' && danfeMatch) {
+        targetStoreId = danfeMatch[1];
+        const nfNumber = decodeURIComponent(danfeMatch[2]);
+        this.authService.authorize(consumer, 'financial:read', targetStoreId);
+        responseData = await this.handlers.getDanfe(targetStoreId, nfNumber, queryParams);
+        this.sendJson(res, 200, { success: true, data: responseData });
+        return;
+      }
+
+      // --------------------------------------------------------
+      // DOMAIN 8: ADMINISTRATIVE HISTORICAL ACCESS (SEGREGATED)
+      // --------------------------------------------------------
+
+      // GET /api/v1/admin/unassigned-orders
       if (req.method === 'GET' && pathname === '/api/v1/admin/unassigned-orders') {
         this.authService.enforceScope(consumer, 'admin:historical:read');
         responseData = await this.handlers.listUnassignedOrders(queryParams);
@@ -298,4 +445,3 @@ if (require.main === module) {
     process.exit(1);
   });
 }
-
