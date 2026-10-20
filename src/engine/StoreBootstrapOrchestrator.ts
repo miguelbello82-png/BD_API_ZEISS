@@ -129,9 +129,11 @@ export class StoreBootstrapOrchestrator {
       this.logger.warn('StoreBootstrap', `Store ${store.code} is already active. Running re-bootstrap / historical repair.`);
     }
 
-    // 2. Transition store to 'bootstrapping'
-    await this.updateStoreStatus(storeId, 'bootstrapping');
-    this.logger.info('StoreBootstrap', `Transitioned store ${store.code} to 'bootstrapping'`);
+    // 2. Transition store to 'validating' during bootstrap execution
+    if (store.status === 'ready') {
+      await this.updateStoreStatus(storeId, 'validating');
+      this.logger.info('StoreBootstrap', `Transitioned store ${store.code} to 'validating' for bootstrap execution`);
+    }
 
     // 3. Resolve context and build composition deps for the store
     let context: StoreZeissContext;
@@ -174,9 +176,8 @@ export class StoreBootstrapOrchestrator {
       const campaignsSummary = await this.bootstrapCampaignsDomain(context, deps);
       domains['campaigns'] = campaignsSummary;
 
-      // 5. Transition to 'catching_up'
-      await this.updateStoreStatus(storeId, 'catching_up');
-      this.logger.info('StoreBootstrap', `All historical domains complete. Transitioned store ${store.code} to 'catching_up'`);
+      // 5. Incremental catch-up phase
+      this.logger.info('StoreBootstrap', `All historical domains complete. Running incremental catch-up for store ${store.code}`);
 
       // 6. Incremental Catch-up Sync
       let catchUpDone = false;
