@@ -196,6 +196,30 @@ export class CentralMultiStoreScheduler {
       }
     }
 
+    // Bootstrap handoff: if receivables sync has no cursor, check if financial bootstrap completed
+    if ((domain === 'receivables' || domain === 'financial') && operation === 'sync' && (!storeState || !storeState.cursor_value)) {
+      const bootstrapState = await stateRepo.findByKey(provider, 'financial', 'bootstrap');
+      if (bootstrapState && bootstrapState.cursor_value) {
+        try {
+          const bCursor = typeof bootstrapState.cursor_value === 'string'
+            ? JSON.parse(bootstrapState.cursor_value)
+            : bootstrapState.cursor_value;
+          if (bCursor && bCursor.lastCompletedDate) {
+            storeState = {
+              provider,
+              domain,
+              operation,
+              last_sync: bootstrapState.last_sync || new Date(this.clock.now()),
+              cursor_value: JSON.stringify({ lastEndDate: bCursor.lastCompletedDate })
+            };
+            this.logger.info('CentralScheduler', `Seeded receivables cursor from completed bootstrap checkpoint: ${bCursor.lastCompletedDate}`, loggerCtx);
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+    }
+
     if (!options?.force && !this.isDue(policy, storeState)) {
       this.logger.debug('CentralScheduler', 'Policy not due for store, skipping', loggerCtx);
       return 'SKIPPED_NOT_DUE';
