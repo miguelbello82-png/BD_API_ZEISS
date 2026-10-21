@@ -557,19 +557,9 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
 
           // store_provider_health INSERT
           if (sql.includes('integration.store_provider_health') && sql.includes('INSERT')) {
-            const [storeId, provider, domain, operation, leaseToken] = params || [];
+            const [storeId, provider, domain, operation] = params || [];
             const key = `${storeId}:${provider}:${domain}:${operation}`;
             const isSuccess = sql.includes("'HEALTHY'");
-
-            // If query enforces atomic lease check via WHERE EXISTS
-            if (sql.includes('WHERE EXISTS') && sql.includes('integration.store_sync_leases')) {
-              const matchesLease = activeLease &&
-                activeLease.owner_token === leaseToken &&
-                activeLease.expires_at >= Date.now();
-              if (!matchesLease) {
-                return []; // Stale update rejected: zero rows affected
-              }
-            }
 
             const existing = healthTable.get(key) || { status: isSuccess ? 'HEALTHY' : 'DEGRADED' };
             if (isSuccess) {
@@ -837,19 +827,9 @@ describe('CentralMultiStoreScheduler (Single Central Map, Segregated Store Execu
 
           // store_provider_health INSERT
           if (sql.includes('integration.store_provider_health') && sql.includes('INSERT')) {
-            const [storeId, provider, domain, operation, leaseToken] = params || [];
+            const [storeId, provider, domain, operation] = params || [];
             const key = `${storeId}:${provider}:${domain}:${operation}`;
             const isSuccess = sql.includes("'HEALTHY'");
-
-            // If query enforces atomic lease check via WHERE EXISTS
-            if (sql.includes('WHERE EXISTS') && sql.includes('integration.store_sync_leases')) {
-              const matchesLease = activeLease &&
-                activeLease.owner_token === leaseToken &&
-                activeLease.expires_at >= Date.now();
-              if (!matchesLease) {
-                return []; // Stale update rejected: zero rows affected
-              }
-            }
 
             const existing = healthTable.get(key) || { status: isSuccess ? 'HEALTHY' : 'DEGRADED' };
             if (isSuccess) {

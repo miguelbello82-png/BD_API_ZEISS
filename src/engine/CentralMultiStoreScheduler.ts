@@ -12,6 +12,7 @@ import { StoreZeissContext } from '../contracts/store';
 import { PgStoreSyncStateRepository } from '../repositories/postgres/StoreSyncStateRepository';
 import { PgStoreSyncLeaseRepository } from '../repositories/postgres/StoreSyncLeaseRepository';
 import { PgStoreProviderHealthRepository } from '../repositories/postgres/StoreProviderHealthRepository';
+import { FencedDatabaseExecutor, LeaseFencingContext } from './FencedDatabaseExecutor';
 import { buildStoreCompositionRoot } from './StoreCompositionRoot';
 import { SyncExecutionResult, ExecutePolicyOptions } from './Scheduler';
 import { randomUUID } from 'crypto';
@@ -164,10 +165,9 @@ export class CentralMultiStoreScheduler {
       return 'SKIPPED_DISABLED';
     }
 
-    // Store-isolated State, Lease, and Health repositories
+    // Store-isolated State and Lease repositories
     const stateRepo = new PgStoreSyncStateRepository(this.deps.db, store.storeId);
     const leaseRepo = new PgStoreSyncLeaseRepository(this.deps.db, store.storeId);
-    const healthRepo = new PgStoreProviderHealthRepository(this.deps.db, store.storeId);
 
     // Helper: resolves store state with bootstrap handoff
     const resolveStoreState = async (): Promise<SyncState | null> => {
@@ -281,17 +281,20 @@ export class CentralMultiStoreScheduler {
     const keepalivePromise = runKeepalive();
 
     // 4. Execution phase
+    const fencingCtx: LeaseFencingContext = {
+      storeId: store.storeId,
+      provider,
+      domain,
+      operation,
+      ownerToken: this.workerId,
+      isLost: () => ownershipLost
+    };
+
+    const fencedDb = new FencedDatabaseExecutor(this.deps.db, fencingCtx);
+    const healthRepo = new PgStoreProviderHealthRepository(fencedDb, store.storeId);
+
     try {
       this.logger.info('CentralScheduler', 'Acquired lease, starting job for store', loggerCtx);
-
-      const fencingCtx = {
-        storeId: store.storeId,
-        provider,
-        domain,
-        operation,
-        ownerToken: this.workerId,
-        isLost: () => ownershipLost
-      };
 
       // Build store-scoped composition root protected by transactional lease fencing
       const root = buildStoreCompositionRoot(this.deps.db, store, this.logger, this.clock, this.sleeper, fencingCtx);
@@ -323,7 +326,7 @@ export class CentralMultiStoreScheduler {
           return 'EXECUTED_FAILED';
         }
 
-        await healthRepo.recordSuccess(provider, domain, operation, this.workerId);
+        await healthRepo.recordSuccess(provider, domain, operation);
         await stateRepo.upsert({
           provider,
           domain,
@@ -336,7 +339,7 @@ export class CentralMultiStoreScheduler {
         return 'EXECUTED_SUCCESS';
       } else {
         if (!ownershipLost) {
-          await healthRepo.recordFailure(provider, domain, operation, this.workerId).catch((err) => {
+          await healthRepo.recordFailure(provider, domain, operation).catch((err) => {
             this.logger.warn('CentralScheduler', 'Could not record failure status in health repo due to stale lease ownership', { ...loggerCtx, error: err?.message });
           });
         }
@@ -346,7 +349,7 @@ export class CentralMultiStoreScheduler {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!ownershipLost) {
-        await healthRepo.recordFailure(provider, domain, operation, this.workerId).catch(() => {});
+        await healthRepo.recordFailure(provider, domain, operation).catch(() => {});
       }
       this.logger.error('CentralScheduler', 'Fatal execution error for store', { ...loggerCtx, error: msg });
       if (msg.startsWith('Missing job for')) {

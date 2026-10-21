@@ -119,11 +119,11 @@ export interface ISyncLeaseRepository {
 // ----- Provider Health Repository -----
 
 export interface IProviderHealthRepository {
-  /** Record a successful operation run, optionally fenced by active lease token. */
-  recordSuccess(provider: string, domain: string, operation: string, leaseToken?: string): Promise<void>;
+  /** Record a successful operation run. */
+  recordSuccess(provider: string, domain: string, operation: string): Promise<void>;
 
-  /** Record a failed operation run, optionally fenced by active lease token. */
-  recordFailure(provider: string, domain: string, operation: string, leaseToken?: string): Promise<void>;
+  /** Record a failed operation run. */
+  recordFailure(provider: string, domain: string, operation: string): Promise<void>;
 
   /** Read current health status. */
   findByKey(provider: string, domain: string, operation: string): Promise<ProviderHealthRecord | null>;
