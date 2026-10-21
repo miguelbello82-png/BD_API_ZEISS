@@ -32,8 +32,8 @@ describe('StoreProviderHealthFencing - Real PostgreSQL Concurrency Integration',
       throw new Error(`SECURITY VIOLATION: Host "${parsedUrl.hostname}" is not loopback.`);
     }
 
-    poolA = new Pool({ connectionString: rawConnStr, max: 2, connectionTimeoutMillis: 5000 });
-    poolB = new Pool({ connectionString: rawConnStr, max: 2, connectionTimeoutMillis: 5000 });
+    poolA = new Pool({ connectionString: rawConnStr, max: 10, connectionTimeoutMillis: 5000 });
+    poolB = new Pool({ connectionString: rawConnStr, max: 10, connectionTimeoutMillis: 5000 });
 
     // 4. Assert engine reported address and test database name
     const client = await poolA.connect();
@@ -83,118 +83,46 @@ describe('StoreProviderHealthFencing - Real PostgreSQL Concurrency Integration',
   });
 
   afterAll(async () => {
-    // Cleanup test data
-    const client = await poolA.connect();
     try {
-      await client.query('DELETE FROM integration.store_sync_leases WHERE store_id = $1', [storeId]);
-      await client.query('DELETE FROM integration.store_provider_health WHERE store_id = $1', [storeId]);
+      await poolA.query('DELETE FROM integration.store_sync_leases WHERE store_id = $1', [storeId]);
+      await poolA.query('DELETE FROM integration.store_provider_health WHERE store_id = $1', [storeId]);
     } finally {
-      client.release();
       await poolA.end();
       await poolB.end();
     }
   });
 
-  it('demonstrates lock serialization: Connection A locks lease row with FOR UPDATE and blocks Connection B until commit', async () => {
+  const waitForLockContention = async (waitingPid: number, maxWaitMs = 3000): Promise<boolean> => {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const res = await poolA.query<{ waiting: boolean }>(`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted
+        ) OR EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock'
+        ) AS waiting
+      `, [waitingPid]);
+      if (res.rows[0]?.waiting) {
+        return true;
+      }
+      await new Promise(r => setTimeout(r, 20));
+    }
+    return false;
+  };
+
+  it('demonstrates that FencedDatabaseExecutor locks lease row, blocks concurrent Worker B until commit, and rejects stale write from A', async () => {
     const workerA = randomUUID();
     const workerB = randomUUID();
 
-    // Setup initial valid lease for Worker A
-    const setupClient = await poolA.connect();
-    try {
-      await setupClient.query(`
-        INSERT INTO integration.store_sync_leases (store_id, provider, domain, operation, owner_token, expires_at)
-        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP + interval '30 seconds')
-        ON CONFLICT (store_id, provider, domain, operation)
-        DO UPDATE SET owner_token = EXCLUDED.owner_token, expires_at = EXCLUDED.expires_at;
-      `, [storeId, provider, domain, operation, workerA]);
-    } finally {
-      setupClient.release();
-    }
+    // 1. Worker A adquire lease inicial válido no banco
+    await poolA.query(`
+      INSERT INTO integration.store_sync_leases (store_id, provider, domain, operation, owner_token, expires_at)
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP + interval '30 seconds')
+      ON CONFLICT (store_id, provider, domain, operation)
+      DO UPDATE SET owner_token = EXCLUDED.owner_token, expires_at = EXCLUDED.expires_at;
+    `, [storeId, provider, domain, operation, workerA]);
 
-    const clientA: PoolClient = await poolA.connect();
-    const clientB: PoolClient = await poolB.connect();
-
-    let clientBBlocked = true;
-    let clientBLockAcquired = false;
-
-    try {
-      // 1. Connection A starts transaction and locks lease row with FOR UPDATE
-      await clientA.query('BEGIN');
-      await clientA.query(`
-        SELECT owner_token, expires_at
-        FROM integration.store_sync_leases
-        WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4
-        FOR UPDATE;
-      `, [storeId, provider, domain, operation]);
-
-      // 2. Connection B attempts to lock the exact same lease row with FOR UPDATE
-      const connectionBPromise = (async () => {
-        await clientB.query('BEGIN');
-        await clientB.query(`
-          SELECT owner_token
-          FROM integration.store_sync_leases
-          WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4
-          FOR UPDATE;
-        `, [storeId, provider, domain, operation]);
-        clientBLockAcquired = true;
-        clientBBlocked = false;
-        await clientB.query('COMMIT');
-      })();
-
-      // 3. Synchronization barrier: wait 150ms and assert Connection B is blocked by A's row lock
-      await new Promise(resolve => setTimeout(resolve, 150));
-      expect(clientBBlocked).toBe(true);
-      expect(clientBLockAcquired).toBe(false);
-
-      // 4. Connection A writes health status and commits
-      const executorA = new PgDatabaseExecutor(clientA);
-      const healthRepoA = new PgStoreProviderHealthRepository(executorA, storeId);
-      await healthRepoA.recordSuccess(provider, domain, operation);
-      await clientA.query('COMMIT');
-
-      // 5. Connection B immediately unblocks and acquires the lock
-      await connectionBPromise;
-      expect(clientBLockAcquired).toBe(true);
-      expect(clientBBlocked).toBe(false);
-
-      // Verify health table has HEALTHY
-      const healthCheck = await setupClient.query(`
-        SELECT status FROM integration.store_provider_health
-        WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
-      `, [storeId, provider, domain, operation]);
-      expect(healthCheck.rows[0].status).toBe('HEALTHY');
-    } finally {
-      clientA.release();
-      clientB.release();
-    }
-  });
-
-  it('rejects stale write from Worker A after Worker B assumes the lease, preserving B state', async () => {
-    const workerA = randomUUID();
-    const workerB = randomUUID();
-
-    const client = await poolA.connect();
-    try {
-      // Worker B assumes the lease
-      await client.query(`
-        UPDATE integration.store_sync_leases
-        SET owner_token = $5, expires_at = CURRENT_TIMESTAMP + interval '30 seconds'
-        WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
-      `, [storeId, provider, domain, operation, workerB]);
-
-      // State is HEALTHY (recorded previously by B)
-      await client.query(`
-        INSERT INTO integration.store_provider_health (store_id, provider, domain, operation, status)
-        VALUES ($1, $2, $3, $4, 'HEALTHY')
-        ON CONFLICT (store_id, provider, domain, operation)
-        DO UPDATE SET status = 'HEALTHY';
-      `, [storeId, provider, domain, operation]);
-    } finally {
-      client.release();
-    }
-
-    // Worker A (stale executor bound to workerA) attempts to recordFailure
+    // Instancia FencedDatabaseExecutor real para Worker A
     const dbA = new PgDatabaseExecutor(poolA);
     const fencedDbA = new FencedDatabaseExecutor(dbA, {
       storeId,
@@ -203,40 +131,101 @@ describe('StoreProviderHealthFencing - Real PostgreSQL Concurrency Integration',
       operation,
       ownerToken: workerA
     });
-    const healthRepoA = new PgStoreProviderHealthRepository(fencedDbA, storeId);
 
-    // Stale write MUST be rejected atomically with StaleWriteError
-    await expect(
-      healthRepoA.recordFailure(provider, domain, operation)
-    ).rejects.toThrow(StaleWriteError);
+    // Conexão B independente dedicada
+    const clientB: PoolClient = await poolB.connect();
+    let bCompleted = false;
+    let bLockWaitDetected = false;
 
-    // Verify current state remains HEALTHY (unmodified by stale Worker A)
-    const verifyClient = await poolA.connect();
     try {
-      const res = await verifyClient.query(`
+      const pidBResult = await clientB.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const pidB = pidBResult.rows[0].pid;
+
+      // Synchronization barrier promises
+      let notifyALockAcquired!: () => void;
+      const aLockAcquiredPromise = new Promise<void>((resolve) => {
+        notifyALockAcquired = resolve;
+      });
+
+      let allowACommit!: () => void;
+      const allowACommitPromise = new Promise<void>((resolve) => {
+        allowACommit = resolve;
+      });
+
+      // Worker A inicia transação protegida através do FencedDatabaseExecutor real
+      const aTransactionPromise = fencedDbA.transaction(async (fencedTx) => {
+        // Neste ponto, o FencedDatabaseExecutor já executou validateLeaseOwnership(txClient),
+        // adquirindo o lock FOR UPDATE na linha de store_sync_leases para esta conexão e transação!
+        notifyALockAcquired();
+
+        // Aguarda a confirmação de que Worker B tentou assumir o lease e ficou retido no lock
+        await allowACommitPromise;
+
+        // Worker A grava health com sucesso através do repositório fenced real
+        const healthRepoA = new PgStoreProviderHealthRepository(fencedTx, storeId);
+        await healthRepoA.recordSuccess(provider, domain, operation);
+      });
+
+      // Aguarda Worker A adquirir o lock de linha via FencedDatabaseExecutor
+      await aLockAcquiredPromise;
+
+      // Worker B na Conexão B tenta assumir o lease atualizando o owner_token para workerB
+      const bUpdatePromise = (async () => {
+        await clientB.query(`
+          UPDATE integration.store_sync_leases
+          SET owner_token = $5, expires_at = CURRENT_TIMESTAMP + interval '30 seconds'
+          WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
+        `, [storeId, provider, domain, operation, workerB]);
+        bCompleted = true;
+      })();
+
+      // Verifica de forma determinística no PostgreSQL se Conexão B está bloqueada por lock
+      bLockWaitDetected = await waitForLockContention(pidB);
+      expect(bLockWaitDetected).toBe(true);
+      expect(bCompleted).toBe(false);
+
+      // Libera Worker A para gravar health e realizar o COMMIT
+      allowACommit();
+      await aTransactionPromise;
+
+      // Uma vez que A confirmou, o lock é liberado e Worker B avança e conclui
+      await bUpdatePromise;
+      expect(bCompleted).toBe(true);
+
+      // Verifica se o estado gravado por A foi registrado como HEALTHY
+      const healthAfterA = await poolA.query<{ status: string }>(`
         SELECT status FROM integration.store_provider_health
         WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
       `, [storeId, provider, domain, operation]);
-      expect(res.rows[0].status).toBe('HEALTHY');
+      expect(healthAfterA.rows[0].status).toBe('HEALTHY');
+
+      // Agora Worker B é o dono soberano do lease.
+      // Worker A tenta tardiamente atualizar health via FencedDatabaseExecutor real (recordFailure)
+      const staleHealthRepoA = new PgStoreProviderHealthRepository(fencedDbA, storeId);
+      await expect(
+        staleHealthRepoA.recordFailure(provider, domain, operation)
+      ).rejects.toThrow(StaleWriteError);
+
+      // Verifica que o estado HEALTHY permanece preservado, sem corrupção pela tentativa tardia de A
+      const healthAfterStaleA = await poolA.query<{ status: string }>(`
+        SELECT status FROM integration.store_provider_health
+        WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
+      `, [storeId, provider, domain, operation]);
+      expect(healthAfterStaleA.rows[0].status).toBe('HEALTHY');
     } finally {
-      verifyClient.release();
+      clientB.release();
     }
   });
 
   it('rejects health write when lease is expired without token replacement', async () => {
     const workerA = randomUUID();
 
-    const client = await poolA.connect();
-    try {
-      // Token matches workerA, but lease is expired 5 seconds in the past
-      await client.query(`
-        UPDATE integration.store_sync_leases
-        SET owner_token = $5, expires_at = CURRENT_TIMESTAMP - interval '5 seconds'
-        WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
-      `, [storeId, provider, domain, operation, workerA]);
-    } finally {
-      client.release();
-    }
+    // Token matches workerA, but lease is expired 5 seconds in the past
+    await poolA.query(`
+      UPDATE integration.store_sync_leases
+      SET owner_token = $5, expires_at = CURRENT_TIMESTAMP - interval '5 seconds'
+      WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
+    `, [storeId, provider, domain, operation, workerA]);
 
     const dbA = new PgDatabaseExecutor(poolA);
     const fencedDbA = new FencedDatabaseExecutor(dbA, {
@@ -257,17 +246,12 @@ describe('StoreProviderHealthFencing - Real PostgreSQL Concurrency Integration',
   it('allows legitimate failure recording under an active valid lease', async () => {
     const workerB = randomUUID();
 
-    const client = await poolA.connect();
-    try {
-      // Worker B holds active lease
-      await client.query(`
-        UPDATE integration.store_sync_leases
-        SET owner_token = $5, expires_at = CURRENT_TIMESTAMP + interval '30 seconds'
-        WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
-      `, [storeId, provider, domain, operation, workerB]);
-    } finally {
-      client.release();
-    }
+    // Worker B holds active lease
+    await poolA.query(`
+      UPDATE integration.store_sync_leases
+      SET owner_token = $5, expires_at = CURRENT_TIMESTAMP + interval '30 seconds'
+      WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
+    `, [storeId, provider, domain, operation, workerB]);
 
     const dbB = new PgDatabaseExecutor(poolB);
     const fencedDbB = new FencedDatabaseExecutor(dbB, {
@@ -283,16 +267,11 @@ describe('StoreProviderHealthFencing - Real PostgreSQL Concurrency Integration',
     await healthRepoB.recordFailure(provider, domain, operation);
 
     // Verify health status is DEGRADED
-    const verifyClient = await poolB.connect();
-    try {
-      const res = await verifyClient.query(`
-        SELECT status FROM integration.store_provider_health
-        WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
-      `, [storeId, provider, domain, operation]);
-      expect(res.rows[0].status).toBe('DEGRADED');
-    } finally {
-      verifyClient.release();
-    }
+    const res = await poolB.query<{ status: string }>(`
+      SELECT status FROM integration.store_provider_health
+      WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
+    `, [storeId, provider, domain, operation]);
+    expect(res.rows[0].status).toBe('DEGRADED');
   });
 
   it('preserves unfenced administrative health updates when not operating under a job lease', async () => {
@@ -302,15 +281,80 @@ describe('StoreProviderHealthFencing - Real PostgreSQL Concurrency Integration',
     // Administrative update does not require lease
     await administrativeHealthRepo.recordSuccess(provider, domain, operation);
 
-    const verifyClient = await poolA.connect();
-    try {
-      const res = await verifyClient.query(`
-        SELECT status FROM integration.store_provider_health
+    const res = await poolA.query<{ status: string }>(`
+      SELECT status FROM integration.store_provider_health
+      WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
+    `, [storeId, provider, domain, operation]);
+    expect(res.rows[0].status).toBe('HEALTHY');
+  });
+
+  it('verifies stability and repeatability of the concurrency lock barrier across multiple iterations', async () => {
+    // Repetição determinística para comprovação estrita de ausência de flakiness
+    for (let iteration = 1; iteration <= 3; iteration++) {
+      const iterWorkerA = randomUUID();
+      const iterWorkerB = randomUUID();
+
+      await poolA.query(`
+        UPDATE integration.store_sync_leases
+        SET owner_token = $5, expires_at = CURRENT_TIMESTAMP + interval '30 seconds'
         WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
-      `, [storeId, provider, domain, operation]);
-      expect(res.rows[0].status).toBe('HEALTHY');
-    } finally {
-      verifyClient.release();
+      `, [storeId, provider, domain, operation, iterWorkerA]);
+
+      const dbA = new PgDatabaseExecutor(poolA);
+      const fencedDbA = new FencedDatabaseExecutor(dbA, {
+        storeId,
+        provider,
+        domain,
+        operation,
+        ownerToken: iterWorkerA
+      });
+
+      const clientB = await poolB.connect();
+      try {
+        const pidBResult = await clientB.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+        const pidB = pidBResult.rows[0].pid;
+
+        let notifyALockAcquired!: () => void;
+        const aLockAcquiredPromise = new Promise<void>((resolve) => {
+          notifyALockAcquired = resolve;
+        });
+
+        let allowACommit!: () => void;
+        const allowACommitPromise = new Promise<void>((resolve) => {
+          allowACommit = resolve;
+        });
+
+        const aTxPromise = fencedDbA.transaction(async (fencedTx) => {
+          notifyALockAcquired();
+          await allowACommitPromise;
+          const healthRepoA = new PgStoreProviderHealthRepository(fencedTx, storeId);
+          await healthRepoA.recordSuccess(provider, domain, operation);
+        });
+
+        await aLockAcquiredPromise;
+
+        let bDone = false;
+        const bPromise = clientB.query(`
+          UPDATE integration.store_sync_leases
+          SET owner_token = $5, expires_at = CURRENT_TIMESTAMP + interval '30 seconds'
+          WHERE store_id = $1 AND provider = $2 AND domain = $3 AND operation = $4;
+        `, [storeId, provider, domain, operation, iterWorkerB]).then(() => { bDone = true; });
+
+        const isContending = await waitForLockContention(pidB);
+        expect(isContending).toBe(true);
+        expect(bDone).toBe(false);
+
+        allowACommit();
+        await aTxPromise;
+        await bPromise;
+        expect(bDone).toBe(true);
+
+        // Stale write rejection
+        const staleRepoA = new PgStoreProviderHealthRepository(fencedDbA, storeId);
+        await expect(staleRepoA.recordFailure(provider, domain, operation)).rejects.toThrow(StaleWriteError);
+      } finally {
+        clientB.release();
+      }
     }
   });
 });
